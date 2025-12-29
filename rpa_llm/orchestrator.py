@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -17,6 +19,23 @@ from .vault import (
     model_output_note_body,
     write_markdown,
 )
+
+
+def _now_local_iso() -> str:
+    # 本地时区（macOS 会自动取系统时区）
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _fmt_secs(s: float) -> str:
+    if s < 60:
+        return f"{s:.1f}s"
+    if s < 3600:
+        return f"{s/60:.1f}m"
+    return f"{s/3600:.2f}h"
 
 
 def load_brief(path: Path) -> Brief:
@@ -71,7 +90,7 @@ async def run_site_worker(
 ) -> List[ModelResult]:
     """
     站点内串行（tasks 顺序跑），站点间可并行（由 run_all 调度）。
-    sem 用于限制并行站点数（避免同时开太多浏览器/触发风控/机器压力过大）。
+    增加时间打点：每 task 的开始/结束/耗时 + rolling avg + ETA。
     """
     results: List[ModelResult] = []
     profile_dir = profiles_root / site_id
@@ -82,11 +101,63 @@ async def run_site_worker(
     adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=site_artifacts, headless=headless)
 
     async def _run() -> List[ModelResult]:
+        total = len(tasks)
+        durations: List[float] = []
+
+        print(
+            f"[{site_id}] worker start | tasks={total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            flush=True,
+        )
+
         async with adapter:
-            for t in tasks:
-                created = utc_now_iso()
+            for idx, t in enumerate(tasks, start=1):
+                started_utc = utc_now_iso()
+                started_local = _now_local_iso()
+                t0 = time.perf_counter()
+
+                # 站点内 ETA：用已完成任务均值估计
+                avg = (sum(durations) / len(durations)) if durations else None
+                eta = None
+                if avg is not None:
+                    remaining = total - idx + 1
+                    eta = avg * remaining
+
+                print(
+                    f"[{site_id}] task {idx}/{total} start | stream={t.stream_id} "
+                    f"| local={started_local} | utc={started_utc}"
+                    + (f" | avg={_fmt_secs(avg)} | eta~{_fmt_secs(eta)}" if avg is not None else ""),
+                    flush=True,
+                )
+
                 try:
                     answer, url = await adapter.ask(t.prompt)
+                    ok = True
+                    err = None
+                except Exception as e:
+                    answer, url = "", (adapter.page.url if adapter else "")
+                    ok = False
+                    err = str(e)
+
+                t1 = time.perf_counter()
+                ended_utc = utc_now_iso()
+                ended_local = _now_local_iso()
+                duration_s = max(0.0, t1 - t0)
+                durations.append(duration_s)
+
+                # 更新 ETA（完成后再给一次更准确的滚动均值）
+                avg2 = sum(durations) / len(durations)
+                remaining2 = total - idx
+                eta2 = avg2 * remaining2
+
+                print(
+                    f"[{site_id}] task {idx}/{total} done | stream={t.stream_id} | ok={ok} "
+                    f"| dur={_fmt_secs(duration_s)} | avg={_fmt_secs(avg2)} | eta~{_fmt_secs(eta2)} "
+                    f"| local_end={ended_local} | utc_end={ended_utc}",
+                    flush=True,
+                )
+
+                created = ended_utc
+                if ok:
                     res = ModelResult(
                         run_id=t.run_id,
                         site_id=t.site_id,
@@ -99,7 +170,7 @@ async def run_site_worker(
                         created_utc=created,
                         ok=True,
                     )
-                except Exception as e:
+                else:
                     res = ModelResult(
                         run_id=t.run_id,
                         site_id=t.site_id,
@@ -108,15 +179,15 @@ async def run_site_worker(
                         topic=t.topic,
                         prompt=t.prompt,
                         answer_text="",
-                        source_url=adapter.page.url if adapter else "",
+                        source_url=url,
                         created_utc=created,
                         ok=False,
-                        error=str(e),
+                        error=err,
                     )
 
                 results.append(res)
 
-                # 写入 Obsidian：每个结果一份
+                # 写入 Obsidian：每个结果一份（把时间信息写入 frontmatter）
                 fname = make_model_output_filename(t.topic, t.stream_id, t.site_id)
                 out_path = vault_paths["model"] / fname
                 fm = {
@@ -127,11 +198,21 @@ async def run_site_worker(
                     "topic": res.topic,
                     "stream": f"{res.stream_id} | {res.stream_name}",
                     "url": res.source_url,
+                    "ok": str(ok),
+                    "started_utc": started_utc,
+                    "ended_utc": ended_utc,
+                    "started_local": started_local,
+                    "ended_local": ended_local,
+                    "duration_s": f"{duration_s:.3f}",
                     "tags": tags[:12],
                 }
                 body = model_output_note_body(res.prompt, res.answer_text if res.ok else f"ERROR: {res.error}")
                 write_markdown(out_path, fm, body)
 
+        print(
+            f"[{site_id}] worker end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            flush=True,
+        )
         return results
 
     if sem is None:
@@ -207,19 +288,37 @@ async def run_synthesis_and_final(
 
     prompt = _build_synthesis_prompt(brief, results)
 
+    print(f"[synthesis] start | local={_now_local_iso()} | utc={_now_utc_iso()}", flush=True)
+    t0 = time.perf_counter()
+    started_utc = utc_now_iso()
+    started_local = _now_local_iso()
+
     adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=site_artifacts, headless=headless)
     async with adapter:
-        created = utc_now_iso()
         answer, url = await adapter.ask(prompt, timeout_s=420)
+
+    t1 = time.perf_counter()
+    ended_utc = utc_now_iso()
+    ended_local = _now_local_iso()
+    dur = max(0.0, t1 - t0)
+    print(
+        f"[synthesis] done | dur={_fmt_secs(dur)} | local_end={ended_local} | utc_end={ended_utc}",
+        flush=True,
+    )
 
     synth_path = vault_paths["synth"] / "synthesis__chatgpt.md"
     fm_s = {
         "type": ["synthesis"],
-        "created": created,
+        "created": ended_utc,
         "author": "chatgpt",
         "run_id": run_id,
         "topic": brief.topic,
         "url": url,
+        "started_utc": started_utc,
+        "ended_utc": ended_utc,
+        "started_local": started_local,
+        "ended_local": ended_local,
+        "duration_s": f"{dur:.3f}",
         "tags": tags[:12],
     }
     write_markdown(synth_path, fm_s, answer)
@@ -227,11 +326,16 @@ async def run_synthesis_and_final(
     final_path = vault_paths["final"] / "final__chatgpt.md"
     fm_f = {
         "type": ["final_decision"],
-        "created": created,
+        "created": ended_utc,
         "author": "chatgpt",
         "run_id": run_id,
         "topic": brief.topic,
         "url": url,
+        "started_utc": started_utc,
+        "ended_utc": ended_utc,
+        "started_local": started_local,
+        "ended_local": ended_local,
+        "duration_s": f"{dur:.3f}",
         "tags": tags[:12],
     }
     write_markdown(final_path, fm_f, answer)
@@ -269,8 +373,16 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
     for t in tasks:
         site_map.setdefault(t.site_id, []).append(t)
 
-    # === 并行执行站点（站点内仍串行），并发上限建议 2~3 ===
-    max_parallel_sites = int(brief.output.get("max_parallel_sites", 5))
+    total_tasks = len(tasks)
+    print(
+        f"[run_all] start | sites={len(site_map)} tasks={total_tasks} "
+        f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
+        flush=True,
+    )
+    global_t0 = time.perf_counter()
+
+    # 并行执行站点（站点内仍串行），并发上限建议 2~3
+    max_parallel_sites = int(brief.output.get("max_parallel_sites", 2))
     sem = asyncio.Semaphore(max_parallel_sites)
 
     coros = []
@@ -297,7 +409,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
             continue
         all_results.extend(item)
 
-    # A：仲裁融合与最终结论（用 chatgpt UI）
+    # 仲裁融合与最终结论（用 chatgpt UI）
     try:
         await run_synthesis_and_final(
             brief=brief,
@@ -311,5 +423,13 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
         )
     except Exception as e:
         print(f"[synthesis] failed: {e}", flush=True)
+
+    global_t1 = time.perf_counter()
+    print(
+        f"[run_all] end | results={len(all_results)}/{total_tasks} "
+        f"| dur={_fmt_secs(max(0.0, global_t1 - global_t0))} "
+        f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
+        flush=True,
+    )
 
     return run_index_path, all_results
