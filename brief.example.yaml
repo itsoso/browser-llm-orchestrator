@@ -1,0 +1,62 @@
+topic: "如何用浏览器RPA编排多个LLM做深度调研并落盘到Obsidian"
+context: |
+  目标：基于一个课题，多站点多模型执行 Stream A 广度调研 + Stream B 红队批判，
+  输出可审计的结论材料并写入 Obsidian Vault，便于长期知识沉淀与决策引用。
+
+questions:
+  - "如何设计可复现的多LLM研究流水线（输入/输出schema）？"
+  - "如何做断言级融合与证据加权仲裁？"
+  - "Playwright GUI 自动化在多站点场景下如何保证稳定性与低维护成本？"
+
+streams:
+  - id: breadth
+    name: "DeepResearch"
+    prompt_template: |
+      你是研究员。请对以下课题做广度事实调研，优先引用一手资料或可靠来源。
+      课题：{topic}
+      背景：{context}
+      研究问题：
+      {questions_bullets}
+
+      输出必须包含以下章节（按此顺序）：
+      1) Executive Summary（<=10行）
+      2) Key Claims（编号C1..）
+      3) Evidence & Sources（按C编号对应，尽量给出可访问来源信息）
+      4) Counterpoints / Uncertainties
+      5) Assumptions
+      6) Confidence（低/中/高 + 理由）
+      7) Next Verification Steps（可执行）
+  - id: redteam
+    name: "Red Teaming"
+    prompt_template: |
+      你是红队审查员。请对以下课题的主流观点进行批判性验证，找漏洞、边界条件与反例。
+      课题：{topic}
+      背景：{context}
+      研究问题：
+      {questions_bullets}
+
+      输出必须包含：
+      1) Attack Surface（可能出错的点）
+      2) Claims to Challenge（编号R1..）
+      3) Counterevidence / Failure Modes（按R编号）
+      4) How to Falsify（如何证伪/验证）
+      5) Residual Risks（仍然存在的风险）
+      6) Confidence（低/中/高 + 理由）
+
+sites:
+  - chatgpt
+  - gemini
+  - perplexity
+  - grok
+  - qianwen
+
+output:
+  vault_path: "/ABS/PATH/TO/YOUR/OBSIDIAN/VAULT"
+  root_dir: "10_ResearchRuns"
+  tags:
+    - "RPA"
+    - "GUI自动化"
+    - "多LLM"
+    - "DeepResearch"
+    - "RedTeaming"
+    - "Obsidian"
