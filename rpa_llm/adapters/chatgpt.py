@@ -392,12 +392,22 @@ class ChatGPTAdapter(SiteAdapter):
         except Exception:
             pass
 
-        # type (more reliable than fill for some SPA inputs)
+        # 优先使用 fill（快速且完整），失败时 fallback 到 type
+        # fill 对于长 prompt 更可靠，不会因为延迟导致超时
         try:
-            await asyncio.wait_for(tb.type(prompt, delay=3), timeout=45)
-        except Exception as e:
-            await self.save_artifacts("send_hang_type")
-            raise RuntimeError(f"send: textbox type timeout/failed: {e}")
+            await asyncio.wait_for(tb.fill(prompt), timeout=15)
+            self._log(f"send: used fill() (prompt_len={len(prompt)})")
+        except Exception as fill_err:
+            # fill 失败，fallback 到 type（模拟键盘输入，更慢但更兼容某些 SPA）
+            self._log(f"send: fill() failed, fallback to type() (err={fill_err})")
+            try:
+                # 对于长 prompt，计算合理的超时时间：每字符 3ms + 10秒缓冲
+                type_timeout = min(60, max(15, len(prompt) * 0.003 + 10))
+                await asyncio.wait_for(tb.type(prompt, delay=3), timeout=type_timeout)
+                self._log(f"send: used type() (prompt_len={len(prompt)}, timeout={type_timeout:.1f}s)")
+            except Exception as type_err:
+                await self.save_artifacts("send_hang_type")
+                raise RuntimeError(f"send: both fill() and type() failed. fill_err={fill_err}, type_err={type_err}")
 
         # arm input events
         try:
