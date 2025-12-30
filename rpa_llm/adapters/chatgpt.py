@@ -132,47 +132,49 @@ class ChatGPTAdapter(SiteAdapter):
         返回 (textbox_locator, frame, how) 或 None
         优先：placeholder/role（更稳）
         其次：CSS
+        
+        性能优化：使用超时保护，避免长时间等待
         """
         ph = re.compile(r"(询问|Message|Ask|anything|输入)", re.I)
 
         for frame in self._frames_in_priority():
-            # placeholder 优先
+            # placeholder 优先（快速检查，不等待 count）
             try:
                 loc = frame.get_by_placeholder(ph).first
-                if await loc.count() > 0:
-                    try:
-                        await loc.scroll_into_view_if_needed(timeout=1000)
-                    except Exception:
-                        pass
-                    if await self._try_visible(loc):
+                # 使用 wait_for 而不是 count + is_visible，更快
+                try:
+                    await loc.wait_for(state="attached", timeout=500)
+                    # 快速检查可见性，不等待 scroll
+                    if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
                         return loc, frame, "get_by_placeholder"
+                except (asyncio.TimeoutError, Exception):
+                    pass
             except Exception:
                 pass
 
-            # role=textbox
+            # role=textbox（快速检查）
             try:
                 loc = frame.get_by_role("textbox").first
-                if await loc.count() > 0:
-                    try:
-                        await loc.scroll_into_view_if_needed(timeout=1000)
-                    except Exception:
-                        pass
-                    if await self._try_visible(loc):
+                try:
+                    await loc.wait_for(state="attached", timeout=500)
+                    if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
                         return loc, frame, "get_by_role(textbox)"
+                except (asyncio.TimeoutError, Exception):
+                    pass
             except Exception:
                 pass
 
-            # css selectors
+            # css selectors（按优先级，找到第一个就返回）
             for sel in self.TEXTBOX_CSS:
                 try:
                     loc = frame.locator(sel).first
-                    if await loc.count() > 0:
-                        try:
-                            await loc.scroll_into_view_if_needed(timeout=1000)
-                        except Exception:
-                            pass
-                        if await self._try_visible(loc):
+                    # 使用 wait_for 快速检查
+                    try:
+                        await loc.wait_for(state="attached", timeout=500)
+                        if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
                             return loc, frame, f"css:{sel}"
+                    except (asyncio.TimeoutError, Exception):
+                        continue
                 except Exception:
                     continue
 
@@ -262,7 +264,8 @@ class ChatGPTAdapter(SiteAdapter):
 
     async def ensure_ready(self) -> None:
         self._log("ensure_ready: start")
-        await asyncio.sleep(0.6)
+        # 减少初始延迟，页面可能已经加载完成
+        await asyncio.sleep(0.2)
 
         # Cloudflare 直接进入人工点一次（但支持 auto-continue）
         if await self._is_cloudflare():
@@ -275,20 +278,27 @@ class ChatGPTAdapter(SiteAdapter):
         total_timeout_s = 60
         t0 = time.time()
         hb = t0
+        check_count = 0
 
         while time.time() - t0 < total_timeout_s:
-            await self._dismiss_overlays()
+            # 前几次检查不 dismiss overlays，加快速度
+            if check_count >= 3:
+                await self._dismiss_overlays()
+            
             found = await self._find_textbox_any_frame()
             if found:
                 _, frame, how = found
-                self._log(f"ensure_ready: textbox OK via {how}. frame={frame.url}")
+                self._log(f"ensure_ready: textbox OK via {how}. frame={frame.url} (took {time.time()-t0:.2f}s)")
                 return
 
+            check_count += 1
             if time.time() - hb >= 5:
-                self._log("ensure_ready: still locating textbox...")
+                self._log(f"ensure_ready: still locating textbox... (attempt {check_count})")
                 hb = time.time()
 
-            await asyncio.sleep(0.4)
+            # 前几次快速检查，之后逐渐增加间隔
+            sleep_time = 0.2 if check_count < 5 else 0.4
+            await asyncio.sleep(sleep_time)
 
         await self.save_artifacts("ensure_ready_failed")
         await self.manual_checkpoint(
@@ -392,22 +402,118 @@ class ChatGPTAdapter(SiteAdapter):
         except Exception:
             pass
 
+        # 检测输入框类型：contenteditable div 需要特殊处理
+        is_contenteditable = "contenteditable" in how.lower() or "div" in how.lower()
+        self._log(f"send: textbox type detected: contenteditable={is_contenteditable}")
+        
         # 优先使用 fill（快速且完整），失败时 fallback 到 type
-        # fill 对于长 prompt 更可靠，不会因为延迟导致超时
-        try:
-            await asyncio.wait_for(tb.fill(prompt), timeout=15)
-            self._log(f"send: used fill() (prompt_len={len(prompt)})")
-        except Exception as fill_err:
-            # fill 失败，fallback 到 type（模拟键盘输入，更慢但更兼容某些 SPA）
-            self._log(f"send: fill() failed, fallback to type() (err={fill_err})")
+        # 对于 contenteditable div，fill() 可能不工作，直接使用 type()
+        prompt_sent = False
+        for attempt in range(2):  # 最多尝试2次
             try:
-                # 对于长 prompt，计算合理的超时时间：每字符 3ms + 10秒缓冲
-                type_timeout = min(60, max(15, len(prompt) * 0.003 + 10))
-                await asyncio.wait_for(tb.type(prompt, delay=3), timeout=type_timeout)
-                self._log(f"send: used type() (prompt_len={len(prompt)}, timeout={type_timeout:.1f}s)")
-            except Exception as type_err:
-                await self.save_artifacts("send_hang_type")
-                raise RuntimeError(f"send: both fill() and type() failed. fill_err={fill_err}, type_err={type_err}")
+                self._log(f"send: attempt {attempt+1}, clearing textbox...")
+                # 先清空
+                try:
+                    await asyncio.wait_for(tb.fill(""), timeout=5)
+                except:
+                    # 对于 contenteditable，可能需要特殊清空方式
+                    try:
+                        await tb.evaluate("el => el.textContent = ''")
+                    except:
+                        pass
+                await asyncio.sleep(0.3)  # 等待清空完成
+                
+                # 对于 contenteditable div，优先使用 type()；对于 textarea，优先使用 fill()
+                if is_contenteditable:
+                    self._log(f"send: using type() for contenteditable (prompt_len={len(prompt)})")
+                    type_timeout = min(90, max(20, len(prompt) * 0.003 + 15))  # 更长的超时
+                    await asyncio.wait_for(tb.type(prompt, delay=3), timeout=type_timeout)
+                    self._log(f"send: type() completed (timeout={type_timeout:.1f}s)")
+                else:
+                    # 尝试 fill
+                    try:
+                        await asyncio.wait_for(tb.fill(prompt), timeout=15)
+                        self._log(f"send: used fill() (prompt_len={len(prompt)})")
+                    except Exception as fill_err:
+                        # fill 失败，fallback 到 type
+                        self._log(f"send: fill() failed, trying type() (err={fill_err})")
+                        type_timeout = min(90, max(20, len(prompt) * 0.003 + 15))
+                        await asyncio.wait_for(tb.type(prompt, delay=3), timeout=type_timeout)
+                        self._log(f"send: used type() (prompt_len={len(prompt)}, timeout={type_timeout:.1f}s)")
+                
+                # 验证输入框内容是否完整（关键步骤，但添加超时保护）
+                self._log(f"send: verifying content (prompt_len={len(prompt)})...")
+                await asyncio.sleep(0.5)  # 等待内容填充完成
+                try:
+                    # 尝试多种方法获取输入框内容，每个操作都有超时保护
+                    actual_content = ""
+                    try:
+                        # 方法1: input_value (适用于 textarea/input)，添加超时
+                        actual_content = await asyncio.wait_for(tb.input_value(), timeout=3)
+                    except:
+                        try:
+                            # 方法2: inner_text (适用于 contenteditable div)，添加超时
+                            actual_content = await asyncio.wait_for(tb.inner_text(), timeout=3)
+                        except:
+                            try:
+                                # 方法3: text_content (备用)，添加超时
+                                actual_content = await asyncio.wait_for(tb.text_content(), timeout=3) or ""
+                            except:
+                                # 如果所有方法都失败，尝试通过 evaluate 获取
+                                try:
+                                    actual_content = await asyncio.wait_for(
+                                        tb.evaluate("el => el.textContent || el.value || ''"), timeout=3
+                                    ) or ""
+                                except:
+                                    pass
+                    
+                    actual_clean = (actual_content or "").strip()
+                    prompt_clean = prompt.strip()
+                    
+                    self._log(f"send: verification result - expected_len={len(prompt_clean)}, actual_len={len(actual_clean)}")
+                    
+                    # 比较长度：实际内容应该至少是期望内容的80%
+                    if len(actual_clean) < len(prompt_clean) * 0.8:
+                        self._log(f"send: content mismatch! expected_len={len(prompt_clean)}, actual_len={len(actual_clean)}")
+                        self._log(f"send: expected_preview: {prompt_clean[:200]}...")
+                        self._log(f"send: actual_preview: {actual_clean[:200]}...")
+                        if attempt == 0:
+                            self._log("send: retrying due to content mismatch...")
+                            continue  # 重试一次
+                        else:
+                            await self.save_artifacts("send_content_mismatch")
+                            raise RuntimeError(
+                                f"send: prompt not fully entered after 2 attempts. "
+                                f"expected_len={len(prompt_clean)}, actual_len={len(actual_clean)}, "
+                                f"actual_preview={actual_clean[:200]}"
+                            )
+                    else:
+                        self._log(f"send: content verified OK (expected_len={len(prompt_clean)}, actual_len={len(actual_clean)})")
+                        prompt_sent = True
+                        break
+                except RuntimeError:
+                    raise  # 重新抛出 RuntimeError
+                except Exception as verify_err:
+                    self._log(f"send: verification failed (err={verify_err}), but continuing (may be false negative)")
+                    # 验证失败可能是方法问题，不是内容问题，继续执行
+                    prompt_sent = True
+                    break
+                    
+            except asyncio.TimeoutError as e:
+                if attempt == 1:  # 最后一次尝试失败
+                    await self.save_artifacts("send_timeout")
+                    raise RuntimeError(f"send: timeout after 2 attempts. err={e}")
+                self._log(f"send: attempt {attempt+1} timeout, retrying... (err={e})")
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                if attempt == 1:  # 最后一次尝试失败
+                    await self.save_artifacts("send_hang_type")
+                    raise RuntimeError(f"send: failed after 2 attempts. err={e}")
+                self._log(f"send: attempt {attempt+1} failed, retrying... (err={e})")
+                await asyncio.sleep(0.5)
+
+        if not prompt_sent:
+            raise RuntimeError("send: failed to send prompt after all attempts")
 
         # arm input events
         try:

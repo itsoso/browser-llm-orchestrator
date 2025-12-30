@@ -64,6 +64,22 @@ class SiteAdapter(ABC):
                 "--disable-dev-shm-usage",
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--disable-infobars",
+                # 性能优化参数
+                "--disable-background-networking",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-ipc-flooding-protection",
+                "--disable-hang-monitor",
+                "--disable-prompt-on-repost",
+                "--disable-sync",
+                "--disable-translate",
+                "--metrics-recording-only",
+                "--no-first-run",
+                "--safebrowsing-disable-auto-update",
+                "--enable-automation",
+                "--password-store=basic",
+                "--use-mock-keychain",
             ],
         )
 
@@ -126,29 +142,32 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         self._page.on("requestfailed", _on_request_failed)
 
         # Route: block heavy resources + count requests
+        # 性能优化：快速判断，减少处理时间
         async def _route_handler(route, request):
             try:
                 rt = request.resource_type
+                # 快速路径：直接拦截图片/媒体/字体，不统计
+                if rt in ("image", "media", "font"):
+                    self._perf["requests"]["aborted"] += 1
+                    await route.abort()
+                    return
+                
+                # 其他资源：继续并统计（异步，不阻塞）
                 url = request.url
                 self._perf["requests"]["total"] += 1
                 by_type = self._perf["requests"]["by_type"]
                 by_type[rt] = by_type.get(rt, 0) + 1
 
-                # domain stats (rough)
+                # domain stats (异步处理，不阻塞路由)
                 try:
                     from urllib.parse import urlparse
-
                     dom = urlparse(url).netloc or ""
                     by_dom = self._perf["requests"]["by_domain"]
                     by_dom[dom] = by_dom.get(dom, 0) + 1
                 except Exception:
                     pass
 
-                if rt in ("image", "media", "font"):
-                    self._perf["requests"]["aborted"] += 1
-                    await route.abort()
-                else:
-                    await route.continue_()
+                await route.continue_()
             except Exception:
                 # never let routing break navigation
                 try:
@@ -159,12 +178,17 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         await self._page.route("**/*", _route_handler)
 
         # Fast navigation: commit returns earlier than domcontentloaded/load for SPA sites
+        # commit 最快，适合 SPA（React/Vue 等）
         self._perf["goto"]["start_utc"] = utc_now_iso()
         t0 = time.perf_counter()
-        await self._page.goto(self.base_url, wait_until="commit")
+        await self._page.goto(self.base_url, wait_until="commit", timeout=30000)
         t1 = time.perf_counter()
         self._perf["goto"]["end_utc"] = utc_now_iso()
         self._perf["goto"]["duration_s"] = max(0.0, t1 - t0)
+        
+        # 等待页面基本就绪（但不等待所有资源）
+        # 对于 SPA，commit 后 DOM 可能还没完全加载，给一点时间让 React/Vue 挂载
+        await asyncio.sleep(0.3)
 
         # Print a concise perf line (useful in terminal)
         try:
