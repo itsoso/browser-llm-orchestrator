@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,9 @@ from typing import Dict, List, Tuple
 import yaml
 
 from .adapters import create_adapter
+from .driver_client import run_task as driver_run_task
 from .models import Brief, ModelResult, StreamSpec, Task
+from .prompts import SynthesisPromptConfig, build_dual_model_arbitration_prompt
 from .utils import ensure_dir, utc_now_iso
 from .vault import (
     build_run_index_note,
@@ -22,7 +25,6 @@ from .vault import (
 
 
 def _now_local_iso() -> str:
-    # 本地时区（macOS 会自动取系统时区）
     return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 
@@ -30,7 +32,9 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _fmt_secs(s: float) -> str:
+def _fmt_secs(s: float | None) -> str:
+    if s is None:
+        return "n/a"
     if s < 60:
         return f"{s:.1f}s"
     if s < 3600:
@@ -87,25 +91,137 @@ async def run_site_worker(
     tags: List[str],
     headless: bool = False,
     sem: asyncio.Semaphore | None = None,
+    driver_url: str | None = None,
+    task_timeout_s: int = 240,
 ) -> List[ModelResult]:
-    """
-    站点内串行（tasks 顺序跑），站点间可并行（由 run_all 调度）。
-    增加时间打点：每 task 的开始/结束/耗时 + rolling avg + ETA。
-    """
     results: List[ModelResult] = []
-    profile_dir = profiles_root / site_id
-    site_artifacts = artifacts_root / site_id
-    ensure_dir(profile_dir)
-    ensure_dir(site_artifacts)
+    driver_url = (driver_url or "").strip() or None
 
-    adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=site_artifacts, headless=headless)
-
-    async def _run() -> List[ModelResult]:
+    async def _run_via_driver() -> List[ModelResult]:
         total = len(tasks)
         durations: List[float] = []
 
         print(
-            f"[{site_id}] worker start | tasks={total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            f"[{utc_now_iso()}] [{site_id}] worker(driver) start | tasks={total} | driver={driver_url} "
+            f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
+            flush=True,
+        )
+
+        for idx, t in enumerate(tasks, start=1):
+            started_utc = utc_now_iso()
+            started_local = _now_local_iso()
+            t0 = time.perf_counter()
+
+            avg = (sum(durations) / len(durations)) if durations else None
+            eta = avg * (total - idx + 1) if avg is not None else None
+
+            print(
+                f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} start(driver) | stream={t.stream_id} "
+                f"| local={started_local} | utc={started_utc}"
+                + (f" | avg={_fmt_secs(avg)} | eta~{_fmt_secs(eta)}" if avg is not None else ""),
+                flush=True,
+            )
+
+            try:
+                payload = await asyncio.to_thread(driver_run_task, driver_url, site_id, t.prompt, task_timeout_s)
+                ok = bool(payload.get("ok"))
+                answer = payload.get("answer") or ""
+                url = payload.get("url") or ""
+                err = payload.get("error")
+                if not ok and err:
+                    print(f"[{utc_now_iso()}] [{site_id}] driver error: {err}", flush=True)
+            except Exception as e:
+                ok = False
+                answer, url, err = "", "", str(e)
+                print(f"[{utc_now_iso()}] [{site_id}] driver exception: {err}", flush=True)
+
+            t1 = time.perf_counter()
+            ended_utc = utc_now_iso()
+            ended_local = _now_local_iso()
+            duration_s = max(0.0, t1 - t0)
+            durations.append(duration_s)
+
+            avg2 = sum(durations) / len(durations)
+            eta2 = avg2 * (total - idx)
+
+            print(
+                f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} done(driver) | stream={t.stream_id} | ok={ok} "
+                f"| dur={_fmt_secs(duration_s)} | avg={_fmt_secs(avg2)} | eta~{_fmt_secs(eta2)} "
+                f"| local_end={ended_local} | utc_end={ended_utc}",
+                flush=True,
+            )
+
+            if ok:
+                res = ModelResult(
+                    run_id=t.run_id,
+                    site_id=t.site_id,
+                    stream_id=t.stream_id,
+                    stream_name=t.stream_name,
+                    topic=t.topic,
+                    prompt=t.prompt,
+                    answer_text=answer,
+                    source_url=url,
+                    created_utc=ended_utc,
+                    ok=True,
+                )
+            else:
+                res = ModelResult(
+                    run_id=t.run_id,
+                    site_id=t.site_id,
+                    stream_id=t.stream_id,
+                    stream_name=t.stream_name,
+                    topic=t.topic,
+                    prompt=t.prompt,
+                    answer_text="",
+                    source_url=url,
+                    created_utc=ended_utc,
+                    ok=False,
+                    error=err,
+                )
+
+            results.append(res)
+
+            fname = make_model_output_filename(t.topic, t.stream_id, t.site_id)
+            out_path = vault_paths["model"] / fname
+            fm = {
+                "type": ["model_output"],
+                "created": res.created_utc,
+                "author": res.site_id,
+                "run_id": res.run_id,
+                "topic": res.topic,
+                "stream": f"{res.stream_id} | {res.stream_name}",
+                "url": res.source_url,
+                "ok": str(ok),
+                "started_utc": started_utc,
+                "ended_utc": ended_utc,
+                "started_local": started_local,
+                "ended_local": ended_local,
+                "duration_s": f"{duration_s:.3f}",
+                "driver_url": driver_url or "",
+                "tags": tags[:12],
+            }
+            body = model_output_note_body(res.prompt, res.answer_text if res.ok else f"ERROR: {res.error}")
+            write_markdown(out_path, fm, body)
+
+        print(
+            f"[{utc_now_iso()}] [{site_id}] worker(driver) end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            flush=True,
+        )
+        return results
+
+    async def _run_local_adapter() -> List[ModelResult]:
+        total = len(tasks)
+        durations: List[float] = []
+
+        profile_dir = profiles_root / site_id
+        site_artifacts = artifacts_root / site_id
+        ensure_dir(profile_dir)
+        ensure_dir(site_artifacts)
+
+        adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=site_artifacts, headless=headless)
+
+        print(
+            f"[{utc_now_iso()}] [{site_id}] worker(local) start | tasks={total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
             flush=True,
         )
 
@@ -115,15 +231,11 @@ async def run_site_worker(
                 started_local = _now_local_iso()
                 t0 = time.perf_counter()
 
-                # 站点内 ETA：用已完成任务均值估计
                 avg = (sum(durations) / len(durations)) if durations else None
-                eta = None
-                if avg is not None:
-                    remaining = total - idx + 1
-                    eta = avg * remaining
+                eta = avg * (total - idx + 1) if avg is not None else None
 
                 print(
-                    f"[{site_id}] task {idx}/{total} start | stream={t.stream_id} "
+                    f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} start | stream={t.stream_id} "
                     f"| local={started_local} | utc={started_utc}"
                     + (f" | avg={_fmt_secs(avg)} | eta~{_fmt_secs(eta)}" if avg is not None else ""),
                     flush=True,
@@ -144,19 +256,16 @@ async def run_site_worker(
                 duration_s = max(0.0, t1 - t0)
                 durations.append(duration_s)
 
-                # 更新 ETA（完成后再给一次更准确的滚动均值）
                 avg2 = sum(durations) / len(durations)
-                remaining2 = total - idx
-                eta2 = avg2 * remaining2
+                eta2 = avg2 * (total - idx)
 
                 print(
-                    f"[{site_id}] task {idx}/{total} done | stream={t.stream_id} | ok={ok} "
+                    f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} done | stream={t.stream_id} | ok={ok} "
                     f"| dur={_fmt_secs(duration_s)} | avg={_fmt_secs(avg2)} | eta~{_fmt_secs(eta2)} "
                     f"| local_end={ended_local} | utc_end={ended_utc}",
                     flush=True,
                 )
 
-                created = ended_utc
                 if ok:
                     res = ModelResult(
                         run_id=t.run_id,
@@ -167,7 +276,7 @@ async def run_site_worker(
                         prompt=t.prompt,
                         answer_text=answer,
                         source_url=url,
-                        created_utc=created,
+                        created_utc=ended_utc,
                         ok=True,
                     )
                 else:
@@ -180,14 +289,13 @@ async def run_site_worker(
                         prompt=t.prompt,
                         answer_text="",
                         source_url=url,
-                        created_utc=created,
+                        created_utc=ended_utc,
                         ok=False,
                         error=err,
                     )
 
                 results.append(res)
 
-                # 写入 Obsidian：每个结果一份（把时间信息写入 frontmatter）
                 fname = make_model_output_filename(t.topic, t.stream_id, t.site_id)
                 out_path = vault_paths["model"] / fname
                 fm = {
@@ -210,64 +318,21 @@ async def run_site_worker(
                 write_markdown(out_path, fm, body)
 
         print(
-            f"[{site_id}] worker end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            f"[{utc_now_iso()}] [{site_id}] worker(local) end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
             flush=True,
         )
         return results
+
+    async def _run() -> List[ModelResult]:
+        if driver_url:
+            return await _run_via_driver()
+        return await _run_local_adapter()
 
     if sem is None:
         return await _run()
 
     async with sem:
         return await _run()
-
-
-def _build_synthesis_prompt(brief: Brief, results: List[ModelResult]) -> str:
-    ok_results = [r for r in results if r.ok and r.answer_text.strip()]
-    blocks = []
-    for r in ok_results:
-        blocks.append(
-            f"### Source: {r.site_id} / {r.stream_id} ({r.stream_name})\n"
-            f"URL: {r.source_url}\n\n"
-            "```text\n"
-            f"{r.answer_text.strip()}\n"
-            "```\n"
-        )
-
-    materials = "\n".join(blocks) if blocks else "（无可用材料）"
-
-    return f"""
-你是一个“第一性原理 + 可验证改进”的仲裁与融合分析师。
-任务：对同一课题的多模型输出做“断言级融合”，产出可用于决策的最终结论与验证计划。
-
-硬规则：
-1) 只基于下方材料做总结与推理；不确定写【需核验】。
-2) 输出必须可执行：每条建议都要包含【动作 + 指标 + 验证方法】。
-3) 明确区分【共识结论】与【分歧点】。
-4) 给出【证据质量评级】（High/Med/Low）与【置信度】（High/Med/Low）。
-
-课题：{brief.topic}
-
-背景：
-{brief.context}
-
-研究问题：
-{chr(10).join([f"- {q}" for q in brief.questions])}
-
-请输出两部分（Markdown）：
-A) ## Claim Matrix
-- 用表格列出核心断言（C1..）
-- 列：Claim | Supported By | Contradicted By | Evidence Quality | Confidence | How to Verify
-
-B) ## Final Decision
-- Executive Summary（<=10行）
-- Recommendation（动作/指标/验证）
-- Risks & Unknowns（含【需核验】清单）
-- Next Steps（可验证步骤清单）
-
-下面是多模型材料（原文）：
-{materials}
-""".strip()
 
 
 async def run_synthesis_and_final(
@@ -280,37 +345,68 @@ async def run_synthesis_and_final(
     tags: List[str],
     headless: bool = False,
 ) -> None:
-    site_id = "chatgpt"
-    profile_dir = profiles_root / site_id
-    site_artifacts = artifacts_root / f"{site_id}__synthesis"
-    ensure_dir(profile_dir)
-    ensure_dir(site_artifacts)
+    arbitrator_site = str(brief.output.get("arbitrator_site", "gemini")).strip().lower()
+    timeout_s = int(brief.output.get("synthesis_timeout_s", 420))
 
-    prompt = _build_synthesis_prompt(brief, results)
+    # driver_url：优先 brief，其次 env（保留兜底）
+    driver_url = (str(brief.output.get("driver_url", "")).strip() or None) or (
+        (os.environ.get("RPA_DRIVER_URL") or "").strip() or None
+    )
 
-    print(f"[synthesis] start | local={_now_local_iso()} | utc={_now_utc_iso()}", flush=True)
+    left_site = str(brief.output.get("synthesis_left_site", "gemini")).strip().lower()
+    right_site = str(brief.output.get("synthesis_right_site", "chatgpt")).strip().lower()
+
+    cfg = SynthesisPromptConfig(
+        left_site=left_site,
+        right_site=right_site,
+        left_label=left_site.capitalize(),
+        right_label=right_site.capitalize(),
+    )
+    prompt = build_dual_model_arbitration_prompt(brief, results, cfg)
+
+    print(
+        f"[{utc_now_iso()}] [synthesis] start | arbitrator={arbitrator_site} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+        flush=True,
+    )
     t0 = time.perf_counter()
     started_utc = utc_now_iso()
     started_local = _now_local_iso()
 
-    adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=site_artifacts, headless=headless)
-    async with adapter:
-        answer, url = await adapter.ask(prompt, timeout_s=420)
+    if driver_url:
+        payload = await asyncio.to_thread(driver_run_task, driver_url, arbitrator_site, prompt, timeout_s)
+        ok = bool(payload.get("ok"))
+        answer = payload.get("answer") or ""
+        url = payload.get("url") or ""
+        err = payload.get("error")
+        if not ok:
+            raise RuntimeError(f"driver synthesis failed (site={arbitrator_site}): {err}")
+    else:
+        profile_dir = profiles_root / arbitrator_site
+        site_artifacts = artifacts_root / f"{arbitrator_site}__synthesis"
+        ensure_dir(profile_dir)
+        ensure_dir(site_artifacts)
+
+        adapter = create_adapter(arbitrator_site, profile_dir=profile_dir, artifacts_dir=site_artifacts, headless=headless)
+        async with adapter:
+            try:
+                answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+            except TypeError:
+                answer, url = await adapter.ask(prompt)
 
     t1 = time.perf_counter()
     ended_utc = utc_now_iso()
     ended_local = _now_local_iso()
     dur = max(0.0, t1 - t0)
     print(
-        f"[synthesis] done | dur={_fmt_secs(dur)} | local_end={ended_local} | utc_end={ended_utc}",
+        f"[{utc_now_iso()}] [synthesis] done | dur={_fmt_secs(dur)} | local_end={ended_local} | utc_end={ended_utc}",
         flush=True,
     )
 
-    synth_path = vault_paths["synth"] / "synthesis__chatgpt.md"
+    synth_path = vault_paths["synth"] / f"synthesis__{arbitrator_site}.md"
     fm_s = {
         "type": ["synthesis"],
         "created": ended_utc,
-        "author": "chatgpt",
+        "author": arbitrator_site,
         "run_id": run_id,
         "topic": brief.topic,
         "url": url,
@@ -323,11 +419,11 @@ async def run_synthesis_and_final(
     }
     write_markdown(synth_path, fm_s, answer)
 
-    final_path = vault_paths["final"] / "final__chatgpt.md"
+    final_path = vault_paths["final"] / f"final__{arbitrator_site}.md"
     fm_f = {
         "type": ["final_decision"],
         "created": ended_utc,
-        "author": "chatgpt",
+        "author": arbitrator_site,
         "run_id": run_id,
         "topic": brief.topic,
         "url": url,
@@ -343,9 +439,15 @@ async def run_synthesis_and_final(
 
 async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tuple[Path, List[ModelResult]]:
     brief = load_brief(brief_path)
+
     vault_path = Path(brief.output["vault_path"]).expanduser().resolve()
     root_dir = brief.output.get("root_dir", "10_ResearchRuns")
     tags = list(brief.output.get("tags", []))
+
+    driver_url = (str(brief.output.get("driver_url", "")).strip() or None) or (
+        (os.environ.get("RPA_DRIVER_URL") or "").strip() or None
+    )
+    task_timeout_s = int(brief.output.get("task_timeout_s", 240))
 
     vault_paths = make_run_paths(vault_path, root_dir, run_id)
     for p in vault_paths.values():
@@ -375,13 +477,12 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
 
     total_tasks = len(tasks)
     print(
-        f"[run_all] start | sites={len(site_map)} tasks={total_tasks} "
+        f"[{utc_now_iso()}] [run_all] start | sites={len(site_map)} tasks={total_tasks} "
         f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
         flush=True,
     )
     global_t0 = time.perf_counter()
 
-    # 并行执行站点（站点内仍串行），并发上限建议 2~3
     max_parallel_sites = int(brief.output.get("max_parallel_sites", 2))
     sem = asyncio.Semaphore(max_parallel_sites)
 
@@ -397,6 +498,8 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
                 tags=tags,
                 headless=headless,
                 sem=sem,
+                driver_url=driver_url,
+                task_timeout_s=task_timeout_s,
             )
         )
 
@@ -405,11 +508,10 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
 
     for item in all_results_nested:
         if isinstance(item, Exception):
-            print(f"[run_all] site worker failed: {item}", flush=True)
+            print(f"[{utc_now_iso()}] [run_all] site worker failed: {item}", flush=True)
             continue
         all_results.extend(item)
 
-    # 仲裁融合与最终结论（用 chatgpt UI）
     try:
         await run_synthesis_and_final(
             brief=brief,
@@ -422,11 +524,11 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
             headless=headless,
         )
     except Exception as e:
-        print(f"[synthesis] failed: {e}", flush=True)
+        print(f"[{utc_now_iso()}] [synthesis] failed: {e}", flush=True)
 
     global_t1 = time.perf_counter()
     print(
-        f"[run_all] end | results={len(all_results)}/{total_tasks} "
+        f"[{utc_now_iso()}] [run_all] end | results={len(all_results)}/{total_tasks} "
         f"| dur={_fmt_secs(max(0.0, global_t1 - global_t0))} "
         f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
         flush=True,

@@ -2,25 +2,47 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Awaitable, Callable, List, Optional, Tuple
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+from ..utils import utc_now_iso
+
 
 class SiteAdapter(ABC):
+    """
+    Base adapter for browser-based LLM sites.
+
+    Goals:
+    - Persistent profiles (user_data_dir) to retain login state.
+    - Headful (system Chrome) for stability vs anti-bot.
+    - Faster navigation: block heavy resources, goto(wait_until="commit").
+    - Performance diagnostics:
+        * request counts (total/aborted, by resource type)
+        * navigation duration
+        * optional console/network error hooks
+        * dump perf json alongside screenshot/html artifacts
+    - Human checkpoint with optional auto-continue (ready_check).
+    """
+
     site_id: str
     base_url: str
 
     def __init__(self, profile_dir: Path, artifacts_dir: Path, headless: bool = False):
         self.profile_dir = profile_dir
         self.artifacts_dir = artifacts_dir
-        # 对 ChatGPT 这类站点，headless 往往更容易触发风控；这里强制 headful 更稳
         self.headless = headless
+
         self._pw = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
+
+        # perf diagnostics storage (populated in __aenter__)
+        self._perf: dict = {}
 
     async def __aenter__(self) -> "SiteAdapter":
         self.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -28,38 +50,136 @@ class SiteAdapter(ABC):
 
         self._pw = await async_playwright().start()
 
-        # 强烈建议使用系统 Chrome（而非 Playwright bundled Chromium）
         chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.profile_dir),
             executable_path=chrome_path,
-            headless=False,  # 对风控站点：必须 headful
+            headless=False,  # strongly recommended headful for LLM sites
             viewport={"width": 1440, "height": 900},
-            # 不要强行指定 user_agent：容易与真实 Chrome 版本不一致从而更像 bot
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-dev-shm-usage",
-                # 下面两条在某些环境中能略微降低触发概率（非决定性）
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--disable-infobars",
             ],
         )
 
-        # 在任何页面脚本执行前注入，尽早弱化 webdriver 痕迹（非绕过，只是减少显眼特征）
+        # Default timeouts to avoid hanging forever
+        self._context.set_default_timeout(30_000)
+        self._context.set_default_navigation_timeout(45_000)
+
+        # Reduce obvious webdriver signal (best-effort)
         await self._context.add_init_script(
             """
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+"""
         )
 
         pages = self._context.pages
         self._page = pages[0] if pages else await self._context.new_page()
 
-        # 让首跳更“人类”：domcontentloaded 已足够，后续由 adapter 自己 wait/ensure_ready
-        await self._page.goto(self.base_url, wait_until="domcontentloaded")
+        # -------------------------
+        # Performance diagnostics
+        # -------------------------
+        self._perf = {
+            "site_id": self.site_id,
+            "base_url": self.base_url,
+            "local_start": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "utc_start": utc_now_iso(),
+            "goto": {},
+            "requests": {
+                "total": 0,
+                "aborted": 0,
+                "by_type": {},
+                "by_domain": {},
+                "errors": 0,
+            },
+            "console": {
+                "errors": 0,
+                "warnings": 0,
+            },
+        }
+
+        # Console hooks (lightweight)
+        def _on_console(msg):
+            try:
+                t = msg.type
+                if t == "error":
+                    self._perf["console"]["errors"] += 1
+                elif t == "warning":
+                    self._perf["console"]["warnings"] += 1
+            except Exception:
+                pass
+
+        self._page.on("console", _on_console)
+
+        # Request failed hook (network errors)
+        def _on_request_failed(req):
+            try:
+                self._perf["requests"]["errors"] += 1
+            except Exception:
+                pass
+
+        self._page.on("requestfailed", _on_request_failed)
+
+        # Route: block heavy resources + count requests
+        async def _route_handler(route, request):
+            try:
+                rt = request.resource_type
+                url = request.url
+                self._perf["requests"]["total"] += 1
+                by_type = self._perf["requests"]["by_type"]
+                by_type[rt] = by_type.get(rt, 0) + 1
+
+                # domain stats (rough)
+                try:
+                    from urllib.parse import urlparse
+
+                    dom = urlparse(url).netloc or ""
+                    by_dom = self._perf["requests"]["by_domain"]
+                    by_dom[dom] = by_dom.get(dom, 0) + 1
+                except Exception:
+                    pass
+
+                if rt in ("image", "media", "font"):
+                    self._perf["requests"]["aborted"] += 1
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception:
+                # never let routing break navigation
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        await self._page.route("**/*", _route_handler)
+
+        # Fast navigation: commit returns earlier than domcontentloaded/load for SPA sites
+        self._perf["goto"]["start_utc"] = utc_now_iso()
+        t0 = time.perf_counter()
+        await self._page.goto(self.base_url, wait_until="commit")
+        t1 = time.perf_counter()
+        self._perf["goto"]["end_utc"] = utc_now_iso()
+        self._perf["goto"]["duration_s"] = max(0.0, t1 - t0)
+
+        # Print a concise perf line (useful in terminal)
+        try:
+            dur = self._perf["goto"]["duration_s"]
+            total = self._perf["requests"]["total"]
+            aborted = self._perf["requests"]["aborted"]
+            cerr = self._perf["console"]["errors"]
+            rerr = self._perf["requests"]["errors"]
+            print(
+                f"[{utc_now_iso()}] [{self.site_id}] goto(commit) dur={dur:.2f}s req_total={total} aborted={aborted} "
+                f"console_err={cerr} req_err={rerr}",
+                flush=True,
+            )
+        except Exception:
+            pass
 
         return self
 
@@ -76,7 +196,7 @@ class SiteAdapter(ABC):
 
     async def save_artifacts(self, name: str) -> None:
         """
-        保存截图与页面 HTML，用于排查 Cloudflare/登录/弹窗等问题。
+        Save screenshot + HTML + URL + perf JSON for debugging.
         """
         try:
             png = self.artifacts_dir / f"{self.site_id}__{name}.png"
@@ -97,11 +217,52 @@ class SiteAdapter(ABC):
         except Exception:
             pass
 
-    async def manual_checkpoint(self, reason: str):
+        try:
+            # finalize perf snapshot
+            self._perf["utc_snapshot"] = utc_now_iso()
+            perf_path = self.artifacts_dir / f"{self.site_id}__{name}.perf.json"
+            perf_path.write_text(json.dumps(self._perf, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    async def manual_checkpoint(
+        self,
+        reason: str,
+        ready_check: Optional[Callable[[], Awaitable[bool]]] = None,
+        max_wait_s: int = 60,
+    ) -> None:
+        """
+        Human-in-the-loop checkpoint.
+
+        - Saves artifacts.
+        - If ready_check is provided, auto-polls for max_wait_s and continues automatically.
+        - Otherwise (or on timeout), waits for user Enter.
+        """
         await self.save_artifacts("manual_checkpoint")
-        print(f"\n[{self.site_id}] MANUAL CHECKPOINT: {reason}", flush=True)
-        print("请在打开的浏览器中完成操作（Cloudflare/登录/验证码/权限弹窗等）。", flush=True)
-        print("完成后回到终端按 Enter 继续。\n", flush=True)
+
+        print(f"\n[{utc_now_iso()}] [{self.site_id}] MANUAL CHECKPOINT: {reason}", flush=True)
+        print(f"[{utc_now_iso()}] 请在打开的浏览器中完成操作（Cloudflare/登录/验证码/弹窗等）。", flush=True)
+
+        if ready_check is not None:
+            print(f"[{utc_now_iso()}] [{self.site_id}] auto-wait up to {max_wait_s}s ...", flush=True)
+            loop = asyncio.get_event_loop()
+            t0 = loop.time()
+            hb = t0
+            while (loop.time() - t0) < max_wait_s:
+                try:
+                    if await ready_check():
+                        print(f"[{utc_now_iso()}] [{self.site_id}] auto-continue: ready condition met.", flush=True)
+                        return
+                except Exception:
+                    pass
+
+                if (loop.time() - hb) >= 5:
+                    print(f"[{utc_now_iso()}] [{self.site_id}] auto-waiting ...", flush=True)
+                    hb = loop.time()
+
+                await asyncio.sleep(1.0)
+
+        print(f"[{utc_now_iso()}] 完成后回到终端按 Enter 继续。\n", flush=True)
         await asyncio.to_thread(input, "Press Enter to continue...")
 
     async def first_visible(self, selectors: List[str], timeout_ms: int = 5000):
@@ -131,12 +292,11 @@ class SiteAdapter(ABC):
         textbox_selectors: List[str],
         send_button_selectors: List[str],
         prompt: str,
-    ):
+    ) -> None:
         tb = await self.first_visible(textbox_selectors)
         await tb.click()
         await tb.fill(prompt)
 
-        # 优先点击发送按钮；不行则 Enter；再不行 Ctrl+Enter
         if await self.try_click(send_button_selectors):
             return
 
@@ -158,4 +318,7 @@ class SiteAdapter(ABC):
 
     @abstractmethod
     async def ask(self, prompt: str, timeout_s: int = 180) -> Tuple[str, str]:
+        """
+        Return (answer_text, source_url)
+        """
         ...
