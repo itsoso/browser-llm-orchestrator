@@ -423,12 +423,66 @@ class ChatGPTAdapter(SiteAdapter):
                         pass
                 await asyncio.sleep(0.3)  # 等待清空完成
                 
-                # 对于 contenteditable div，优先使用 type()；对于 textarea，优先使用 fill()
+                # 对于 contenteditable div（特别是 ProseMirror），尝试多种方法
                 if is_contenteditable:
-                    self._log(f"send: using type() for contenteditable (prompt_len={len(prompt)})")
-                    type_timeout = min(90, max(20, len(prompt) * 0.003 + 15))  # 更长的超时
-                    await asyncio.wait_for(tb.type(prompt, delay=3), timeout=type_timeout)
-                    self._log(f"send: type() completed (timeout={type_timeout:.1f}s)")
+                    self._log(f"send: using contenteditable method (prompt_len={len(prompt)})")
+                    # 方法1：尝试直接设置内容（最快，适用于 ProseMirror）
+                    try:
+                        await asyncio.wait_for(
+                            tb.evaluate(
+                                """
+                                (el, text) => {
+                                    // 清空现有内容
+                                    el.textContent = '';
+                                    el.innerHTML = '';
+                                    
+                                    // 设置新内容
+                                    el.textContent = text;
+                                    
+                                    // 触发多种事件以确保 ProseMirror 更新
+                                    el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                                    
+                                    // 触发 InputEvent（如果支持）
+                                    try {
+                                        const inputEvent = new InputEvent('input', {
+                                            bubbles: true,
+                                            cancelable: true,
+                                            inputType: 'insertText',
+                                            data: text
+                                        });
+                                        el.dispatchEvent(inputEvent);
+                                    } catch (e) {
+                                        // InputEvent 可能不支持，忽略
+                                    }
+                                }
+                                """,
+                                prompt
+                            ),
+                            timeout=5
+                        )
+                        # 等待一下让事件处理完成
+                        await asyncio.sleep(0.3)
+                        self._log(f"send: used evaluate() for contenteditable (fast path)")
+                    except Exception as eval_err:
+                        # 方法2：尝试 fill（某些 contenteditable 支持）
+                        try:
+                            self._log(f"send: evaluate() failed, trying fill() (err={eval_err})")
+                            await asyncio.wait_for(tb.fill(prompt), timeout=10)
+                            self._log(f"send: used fill() for contenteditable")
+                        except Exception as fill_err:
+                            # 方法3：fallback 到 type()（最慢但最兼容）
+                            self._log(f"send: fill() failed, using type() (err={fill_err})")
+                            # 对于长文本，计算超时时间：每字符 5ms + 20秒缓冲
+                            # 使用 set_timeout 设置 locator 的超时
+                            type_timeout_ms = int(min(120000, max(30000, len(prompt) * 5 + 20000)))
+                            tb_with_timeout = tb.set_timeout(type_timeout_ms)
+                            try:
+                                await tb_with_timeout.type(prompt, delay=3)
+                                self._log(f"send: type() completed (timeout={type_timeout_ms/1000:.1f}s)")
+                            except Exception as type_err:
+                                self._log(f"send: type() failed with timeout {type_timeout_ms/1000:.1f}s (err={type_err})")
+                                raise
                 else:
                     # 尝试 fill
                     try:
@@ -437,9 +491,10 @@ class ChatGPTAdapter(SiteAdapter):
                     except Exception as fill_err:
                         # fill 失败，fallback 到 type
                         self._log(f"send: fill() failed, trying type() (err={fill_err})")
-                        type_timeout = min(90, max(20, len(prompt) * 0.003 + 15))
-                        await asyncio.wait_for(tb.type(prompt, delay=3), timeout=type_timeout)
-                        self._log(f"send: used type() (prompt_len={len(prompt)}, timeout={type_timeout:.1f}s)")
+                        # Playwright 的 type() 需要显式传递 timeout 参数（毫秒）
+                        type_timeout_ms = int(min(90000, max(20000, len(prompt) * 3 + 15000)))
+                        await tb.type(prompt, delay=3, timeout=type_timeout_ms)
+                        self._log(f"send: used type() (prompt_len={len(prompt)}, timeout={type_timeout_ms/1000:.1f}s)")
                 
                 # 验证输入框内容是否完整（关键步骤，但添加超时保护）
                 self._log(f"send: verifying content (prompt_len={len(prompt)})...")
