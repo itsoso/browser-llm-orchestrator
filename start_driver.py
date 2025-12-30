@@ -56,6 +56,7 @@ async def main_async():
     ap.add_argument("--host", help="覆盖配置中的 host")
     ap.add_argument("--headless", action="store_true", help="覆盖配置中的 headless")
     ap.add_argument("--no-prewarm", action="store_true", help="禁用预热")
+    ap.add_argument("--check-warmup", action="store_true", help="启动前检查是否需要预热（仅提示，不自动运行）")
     args = ap.parse_args()
 
     brief_path = Path(args.brief).expanduser().resolve()
@@ -90,6 +91,18 @@ async def main_async():
     print(f"[driver] host: {config['host']}")
     print(f"[driver] headless: {config['headless']}")
     print(f"[driver] prewarm: {config['prewarm']}")
+    
+    # 检查预热状态（可选）
+    if args.check_warmup:
+        profiles_root = Path(config["profiles_root"]).resolve()
+        print(f"\n[driver] 检查预热状态...")
+        for site_id in config["sites"]:
+            profile_dir = profiles_root / site_id
+            if not profile_dir.exists() or not any(profile_dir.iterdir()):
+                print(f"[driver] ⚠️  {site_id}: Profile 目录不存在或为空，建议运行: python warmup.py {site_id}")
+            else:
+                print(f"[driver] ✓  {site_id}: Profile 目录存在")
+        print()
 
     server = DriverServer(
         host=config["host"],

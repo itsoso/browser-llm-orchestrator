@@ -287,29 +287,23 @@ class GeminiAdapter(SiteAdapter):
         await self.ensure_ready()
         await self.new_chat()
 
-        # --- 1. 发送 prompt ---
-        # 重新查找输入框（new_chat 后可能需要重新定位）
+        # --- 1. 寻找输入框 ---
         tb = await self._find_textbox()
         if not tb:
-            raise RuntimeError("Textbox lost after ensure_ready")
+            raise RuntimeError("Gemini textbox lost after ensure_ready")
 
         self._log("ask: filling prompt...")
         
         # 再次清理弹窗（new_chat 后可能有新弹窗）
         await self._dismiss_popups()
-        
-        # --- 2. 针对 contenteditable 的特殊处理 ---
-        # Gemini 使用富文本编辑器（contenteditable div），不是 textarea
-        # textarea 是隐藏的，用于底层表单提交，会被遮挡导致点击超时
-        
-        # 2.1 强制点击（确保聚焦）
+
+        # --- 2. 聚焦 (强制点击) ---
         try:
-            # 先尝试正常点击（超时 5 秒）
+            # [修正] timeout 是参数，不是方法
             await tb.click(timeout=5000)
             self._log("ask: clicked contenteditable (normal)")
-        except Exception as click_err:
-            # 如果被遮挡（比如透明层），尝试强制点击
-            self._log(f"ask: normal click failed, trying force click (err={click_err})")
+        except Exception:
+            self._log("ask: click failed, trying force click...")
             try:
                 await tb.click(force=True, timeout=2000)
                 self._log("ask: clicked contenteditable (force)")
@@ -318,82 +312,116 @@ class GeminiAdapter(SiteAdapter):
                 self._log("ask: click failed, trying focus directly")
                 await tb.focus()
 
-        # 2.2 清空现有内容（contenteditable 最好先清空）
+        # --- 3. 清空 (使用 JS，最稳) ---
         try:
-            await tb.evaluate("el => el.innerText = ''")
+            # 确保元素可见和可交互，然后执行 evaluate（带超时）
+            await tb.wait_for(state="visible", timeout=5000)
+            await asyncio.wait_for(
+                tb.evaluate("el => el.innerText = ''"),
+                timeout=5.0
+            )
             await asyncio.sleep(0.2)
             self._log("ask: cleared contenteditable")
-        except Exception:
-            pass
-
-        # 2.3 输入内容（type 通常比 fill 在富文本上表现更好，能触发 JS 事件）
-        self._log(f"ask: typing {len(prompt)} chars into contenteditable...")
+        except Exception as e:
+            self._log(f"ask: JS clear failed: {e} (non-fatal)")
+            # 清空失败不致命，继续尝试输入
+        
+        # --- 4. 输入内容 ---
+        self._log(f"ask: typing {len(prompt)} chars...")
+        
         try:
-            # 使用 type 而不是 fill，因为 type 能触发 React 状态更新
-            type_timeout_ms = int(min(120000, max(20000, len(prompt) * 5 + 15000)))
-            tb_with_timeout = tb.set_timeout(type_timeout_ms)
-            await tb_with_timeout.type(prompt, delay=5)  # 稍微给点延迟模拟人类
-            self._log(f"ask: typed prompt (len={len(prompt)})")
-        except Exception as type_err:
-            # 如果 type 失败，尝试 fill（某些 contenteditable 也支持）
-            self._log(f"ask: type failed, trying fill (err={type_err})")
+            # [修正] 移除 .set_timeout()，改用 timeout 参数
+            # 计算动态超时：每字符 10ms + 30秒基数
+            type_timeout = max(30000, len(prompt) * 10)
+            
+            # 使用 type 模拟键盘输入（delay=0 更快）
+            await tb.type(prompt, delay=0, timeout=type_timeout)
+            self._log(f"ask: typed prompt (len={len(prompt)}, timeout={type_timeout/1000:.1f}s)")
+            
+        except Exception as e:
+            self._log(f"ask: type failed ({e}), trying JS inject...")
+            # Fallback: JS 注入
             try:
-                tb_with_timeout = tb.set_timeout(10000)
-                await tb_with_timeout.fill(prompt)
-                self._log("ask: filled prompt")
-            except Exception as fill_err:
-                raise RuntimeError(f"ask: both type and fill failed. type_err={type_err}, fill_err={fill_err}")
+                # 确保元素可见和可交互
+                await tb.wait_for(state="visible", timeout=5000)
+                import json
+                js_code = f"el => el.innerText = {json.dumps(prompt)}"
+                await asyncio.wait_for(
+                    tb.evaluate(js_code),
+                    timeout=5.0
+                )
+                # 必须触发 input 事件，否则发送按钮可能不亮
+                await asyncio.wait_for(
+                    tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
+                    timeout=3.0
+                )
+                self._log("ask: injected via JS + triggered input event")
+            except Exception as js_err:
+                self._log(f"ask: JS injection also failed: {js_err}")
+                raise  # 如果 JS 注入也失败，抛出异常
         
         await asyncio.sleep(0.5)
-
-        # 点击发送按钮
+        
+        # --- 5. 发送 (点击按钮 或 回车) ---
         sent = False
         for btn_sel in self.SEND_BTN:
             try:
                 btn = self.page.locator(btn_sel).first
                 if await btn.is_visible(timeout=1000):
-                    await btn.click()
+                    await btn.click(timeout=3000)
                     sent = True
                     self._log(f"ask: clicked send button {btn_sel}")
                     break
             except Exception:
                 continue
-
+        
         if not sent:
-            # 回车兜底
-            self._log("ask: send button not found, using Enter")
-            await tb.press("Enter")
-
-        # --- 2. 等待回复稳定 ---
-        self._log("ask: waiting for response stabilization...")
+            self._log("ask: send button not found, pressing Enter")
+            try:
+                # 确保元素可见和可交互，然后按 Enter（带超时）
+                await tb.wait_for(state="visible", timeout=5000)
+                await tb.press("Enter", timeout=5000)
+                self._log("ask: Enter pressed")
+            except Exception as e:
+                self._log(f"ask: Enter press failed: {e}, trying Control+Enter...")
+                try:
+                    # 尝试 Control+Enter 作为备选
+                    await tb.press("Control+Enter", timeout=5000)
+                    self._log("ask: Control+Enter pressed")
+                except Exception as e2:
+                    self._log(f"ask: Control+Enter also failed: {e2}")
+                    raise RuntimeError(f"ask: both Enter and Control+Enter failed. Enter_err={e}, CtrlEnter_err={e2}")
+            
+        # --- 6. 等待回复 (流式检测) ---
+        self._log("ask: waiting for response...")
         
         last_text = ""
-        stable_count = 0
-        start_wait = time.time()
-        hb = start_wait
-
-        while time.time() - start_wait < timeout_s:
-            # 获取最后一个回复的文本
+        stable_iter = 0
+        start_t = time.time()
+        hb = start_t
+        
+        while time.time() - start_t < timeout_s:
+            # 获取最后一个回复的文本（使用现有的 _last_text 方法）
             text = await self._last_text()
             
             if text and len(text) > 0:
                 if len(text) > len(last_text):
                     # 还在生成
                     last_text = text
-                    stable_count = 0
+                    stable_iter = 0
                 elif len(text) == len(last_text) and len(text) > 5:
                     # 长度稳定
-                    stable_count += 1
-                    if stable_count >= 4:  # 连续 4 次轮询长度不变（约 2 秒）
+                    stable_iter += 1
+                    # 连续 5 次轮询 (约 2.5s) 长度不变，视为完成
+                    if stable_iter > 5:
                         self._log(f"ask: response stabilized (len={len(text)})")
                         return text, self.page.url
-
+            
             if time.time() - hb >= 10:
-                self._log(f"ask: waiting... (elapsed={time.time()-start_wait:.1f}s, stable_count={stable_count})")
+                self._log(f"ask: waiting... (elapsed={time.time()-start_t:.1f}s, stable_iter={stable_iter}, last_len={len(last_text)})")
                 hb = time.time()
-
+            
             await asyncio.sleep(0.5)
-
+            
         await self.save_artifacts("gemini_answer_timeout")
-        await self.manual_checkpoint("Gemini 等待生成超时，请人工确认页面状态。")
-        return await self._last_text(), self.page.url
+        raise TimeoutError(f"Gemini response timeout. last_len={len(last_text)}")

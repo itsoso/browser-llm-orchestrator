@@ -72,10 +72,20 @@ class DriverServer:
             self._sites[site_id] = SiteRuntime(site_id=site_id, adapter=None, lock=asyncio.Lock(), ready=False)
 
         if self.prewarm:
-            print(f"[driver] prewarm start | sites={self.sites} | local={local_iso()} | utc={utc_iso()}", flush=True)
+            print(f"[{beijing_now_iso()}] [driver] prewarm start | sites={self.sites} | local={local_iso()} | utc={utc_iso()}", flush=True)
+            prewarm_failed = []
             for site_id in self.sites:
-                await self._ensure_site(site_id)
-            print(f"[driver] prewarm done | local={local_iso()} | utc={utc_iso()}", flush=True)
+                try:
+                    await self._ensure_site(site_id)
+                except Exception as e:
+                    prewarm_failed.append(site_id)
+                    # 错误信息已在 _ensure_site 中打印，这里只记录失败
+                    print(f"[{beijing_now_iso()}] [driver] prewarm failed: {site_id} (will retry on first request)", flush=True)
+            
+            if prewarm_failed:
+                print(f"[{beijing_now_iso()}] [driver] prewarm partial | success={len(self.sites)-len(prewarm_failed)}/{len(self.sites)} | failed={prewarm_failed} | local={local_iso()} | utc={utc_iso()}", flush=True)
+            else:
+                print(f"[{beijing_now_iso()}] [driver] prewarm done | local={local_iso()} | utc={utc_iso()}", flush=True)
 
         self._server = await asyncio.start_server(self._handle_conn, self.host, self.port)
         addrs = ", ".join(str(sock.getsockname()) for sock in self._server.sockets or [])
@@ -112,10 +122,31 @@ class DriverServer:
 
         adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=art_dir, headless=self.headless)
         # 手动进入 async context（常驻）
-        await adapter.__aenter__()
-        rt.adapter = adapter
-        rt.ready = True
-        print(f"[driver] site ready: {site_id}", flush=True)
+        try:
+            await adapter.__aenter__()
+            rt.adapter = adapter
+            rt.ready = True
+            print(f"[{beijing_now_iso()}] [driver] site ready: {site_id}", flush=True)
+        except Exception as e:
+            # 如果初始化失败（通常是 ensure_ready 失败），提供友好提示
+            error_msg = str(e)
+            if "ensure_ready" in error_msg.lower() or "textbox" in error_msg.lower() or "cannot locate" in error_msg.lower():
+                print(f"\n{'='*70}", flush=True)
+                print(f"[{beijing_now_iso()}] [driver] ⚠️  {site_id} 初始化失败：需要登录或验证", flush=True)
+                print(f"[{beijing_now_iso()}] [driver] 错误: {error_msg}", flush=True)
+                print(f"[{beijing_now_iso()}] [driver] ", flush=True)
+                print(f"[{beijing_now_iso()}] [driver] 💡 解决方案：运行预热脚本手动登录", flush=True)
+                print(f"[{beijing_now_iso()}] [driver]    python warmup.py {site_id}", flush=True)
+                print(f"[{beijing_now_iso()}] [driver] ", flush=True)
+                print(f"[{beijing_now_iso()}] [driver] 或者：", flush=True)
+                print(f"[{beijing_now_iso()}] [driver]    1. 检查 {profile_dir} 目录是否存在", flush=True)
+                print(f"[{beijing_now_iso()}] [driver]    2. 检查是否需要安装 playwright-stealth: pip install playwright-stealth", flush=True)
+                print(f"[{beijing_now_iso()}] [driver]    3. 查看截图: {art_dir}/", flush=True)
+                print(f"{'='*70}\n", flush=True)
+            # 不设置 ready=True，让后续请求可以重试
+            rt.adapter = adapter  # 保留 adapter 引用，但标记为未就绪
+            rt.ready = False
+            raise  # 重新抛出异常，让调用者知道失败
 
     async def _handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -177,7 +208,22 @@ class DriverServer:
                 # 确保 site 常驻 adapter 已启动，并站点内串行
                 rt = self._sites[site_id]
                 async with rt.lock:
-                    await self._ensure_site(site_id)
+                    try:
+                        await self._ensure_site(site_id)
+                    except Exception as e:
+                        # 如果初始化失败，返回友好错误
+                        await self._write_json(
+                            writer,
+                            503,
+                            {
+                                "ok": False,
+                                "site_id": site_id,
+                                "error": f"Site initialization failed: {str(e)}. Please run: python warmup.py {site_id}",
+                                "hint": "The site may need manual login/verification. Use warmup.py to prepare the profile.",
+                            },
+                        )
+                        return
+                    
                     started_utc = utc_iso()
                     started_local = local_iso()
                     t0 = time.perf_counter()

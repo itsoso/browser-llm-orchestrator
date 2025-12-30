@@ -363,8 +363,11 @@ class ChatGPTAdapter(SiteAdapter):
     async def new_chat(self) -> None:
         self._log("new_chat: best effort")
         await self.try_click(self.NEW_CHAT, timeout_ms=2000)
-        # 新聊天会重绘输入框，给一点时间
-        await asyncio.sleep(1.0)
+        # 新聊天会重绘输入框，等待页面稳定
+        await asyncio.sleep(1.5)
+        # 关闭可能的弹窗/遮罩
+        await self._dismiss_overlays()
+        await asyncio.sleep(0.5)
 
     async def _assistant_count(self) -> int:
         for sel in self.ASSISTANT_MSG:
@@ -420,243 +423,168 @@ class ChatGPTAdapter(SiteAdapter):
 
     async def _send_prompt(self, prompt: str) -> None:
         """
-        强健发送：type(delay) + 超时保护 + 发送按钮优先
+        修复版发送逻辑：
+        1. 使用 JS 强制清空 (解决 Node is not input 报错)
+        2. 智能 fallback 输入 (type -> JS injection)
+        3. 组合键发送优先 (解决按钮点击失败)
         """
-        found = await self._find_textbox_any_frame()
-        if not found:
-            await self.save_artifacts("send_no_textbox")
-            await self.manual_checkpoint(
-                "发送前未找到输入框，请手动点一下输入框后继续。",
-                ready_check=self._ready_check_textbox,
-                max_wait_s=60,
-            )
+        # 1. 寻找输入框（带重试机制）
+        found = None
+        max_retries = 5
+        for retry in range(max_retries):
             found = await self._find_textbox_any_frame()
-            if not found:
-                raise RuntimeError("send: textbox still not found")
+            if found:
+                break
+            
+            if retry < max_retries - 1:
+                # 尝试关闭弹窗/遮罩
+                await self._dismiss_overlays()
+                self._log(f"send: textbox not found, retrying... ({retry+1}/{max_retries})")
+                await asyncio.sleep(0.5)
+            else:
+                # 最后一次尝试失败，保存截图并触发 manual checkpoint
+                await self.save_artifacts("send_no_textbox")
+                await self.manual_checkpoint(
+                    "发送前未找到输入框，请手动点一下输入框后继续。",
+                    ready_check=self._ready_check_textbox,
+                    max_wait_s=60,
+                )
+                found = await self._find_textbox_any_frame()
+                if not found:
+                    raise RuntimeError("send: textbox not found")
 
         tb, frame, how = found
         self._log(f"send: textbox via {how} frame={frame.url}")
 
-        # click with hard timeout
+        # 2. 确保焦点（点击失败不致命，可能是被遮挡，JS 输入依然可能成功）
         try:
-            await asyncio.wait_for(tb.click(), timeout=15)
-        except Exception as e:
-            await self.save_artifacts("send_hang_click")
-            raise RuntimeError(f"send: textbox click timeout/failed: {e}")
-
-        # clear (best-effort)
-        try:
-            await asyncio.wait_for(tb.fill(""), timeout=10)
+            await tb.click(timeout=5000)
         except Exception:
             pass
 
-        # 检测输入框类型：contenteditable div 需要特殊处理
-        is_contenteditable = "contenteditable" in how.lower() or "div" in how.lower()
-        self._log(f"send: textbox type detected: contenteditable={is_contenteditable}")
-        
-        # 优先使用 fill（快速且完整），失败时 fallback 到 type
-        # 对于 contenteditable div，fill() 可能不工作，直接使用 type()
+        # 3. 循环尝试写入 (最多 2 次)
         prompt_sent = False
-        for attempt in range(2):  # 最多尝试2次
+        for attempt in range(2):
             try:
-                self._log(f"send: attempt {attempt+1}, clearing textbox...")
-                # 先清空
-                try:
-                    await asyncio.wait_for(tb.fill(""), timeout=5)
-                except:
-                    # 对于 contenteditable，可能需要特殊清空方式
-                    try:
-                        await tb.evaluate("el => el.textContent = ''")
-                    except:
-                        pass
-                await asyncio.sleep(0.3)  # 等待清空完成
+                if attempt > 0:
+                    self._log(f"send: attempt {attempt+1}, clearing textbox...")
                 
-                # 对于 contenteditable div（特别是 ProseMirror），尝试多种方法
-                if is_contenteditable:
-                    self._log(f"send: using contenteditable method (prompt_len={len(prompt)})")
-                    # 方法1：尝试直接设置内容（最快，适用于 ProseMirror）
+                # --- [关键修复] 强制清空逻辑 ---
+                # 不要用 tb.fill("")，这在 div 上不稳定。直接用 JS 清空 DOM。
+                try:
+                    # 确保元素可见和可交互，然后执行 evaluate（带超时）
+                    await tb.wait_for(state="visible", timeout=5000)
+                    await asyncio.wait_for(
+                        tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; }"),
+                        timeout=5.0
+                    )
+                    await asyncio.sleep(0.2)
+                    self._log("send: cleared via JS")
+                except Exception as e:
+                    self._log(f"send: JS clear failed: {e}")
+                    # 清空失败不致命，继续尝试输入
+
+                # --- 输入内容 ---
+                self._log(f"send: writing prompt ({len(prompt)} chars)...")
+                
+                # 策略 A: 优先尝试 type (模拟键盘，最稳，触发 React 事件)
+                # 之前的 fill 容易报错 "Node is not input"，改用 type
+                try:
+                    # 设置超时（毫秒），根据长度动态调整
+                    timeout_ms = max(30000, len(prompt) * 10)
+                    await tb.type(prompt, delay=0, timeout=timeout_ms)
+                    self._log(f"send: typed prompt (timeout={timeout_ms/1000:.1f}s)")
+                except Exception as e:
+                    self._log(f"send: type() failed ({e}), trying JS injection...")
+                    # 策略 B: JS 注入 (最快，但可能不触发事件，需要后续处理)
                     try:
+                        # 确保元素可见和可交互
+                        await tb.wait_for(state="visible", timeout=5000)
+                        # JSON.stringify 处理转义字符
+                        import json
+                        js_code = f"el => el.innerText = {json.dumps(prompt)}"
                         await asyncio.wait_for(
-                            tb.evaluate(
-                                """
-                                (el, text) => {
-                                    // 清空现有内容
-                                    el.textContent = '';
-                                    el.innerHTML = '';
-                                    
-                                    // 设置新内容
-                                    el.textContent = text;
-                                    
-                                    // 触发多种事件以确保 ProseMirror 更新
-                                    el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-                                    el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-                                    
-                                    // 触发 InputEvent（如果支持）
-                                    try {
-                                        const inputEvent = new InputEvent('input', {
-                                            bubbles: true,
-                                            cancelable: true,
-                                            inputType: 'insertText',
-                                            data: text
-                                        });
-                                        el.dispatchEvent(inputEvent);
-                                    } catch (e) {
-                                        // InputEvent 可能不支持，忽略
-                                    }
-                                }
-                                """,
-                                prompt
-                            ),
-                            timeout=5
+                            tb.evaluate(js_code),
+                            timeout=5.0
                         )
-                        # 等待一下让事件处理完成
-                        await asyncio.sleep(0.3)
-                        self._log(f"send: used evaluate() for contenteditable (fast path)")
-                    except Exception as eval_err:
-                        # 方法2：尝试 fill（某些 contenteditable 支持）
-                        try:
-                            self._log(f"send: evaluate() failed, trying fill() (err={eval_err})")
-                            await asyncio.wait_for(tb.fill(prompt), timeout=10)
-                            self._log(f"send: used fill() for contenteditable")
-                        except Exception as fill_err:
-                            # 方法3：fallback 到 type()（最慢但最兼容）
-                            self._log(f"send: fill() failed, using type() (err={fill_err})")
-                            # 对于长文本，计算超时时间：每字符 5ms + 20秒缓冲
-                            # 使用 set_timeout 设置 locator 的超时
-                            type_timeout_ms = int(min(120000, max(30000, len(prompt) * 5 + 20000)))
-                            tb_with_timeout = tb.set_timeout(type_timeout_ms)
-                            try:
-                                await tb_with_timeout.type(prompt, delay=3)
-                                self._log(f"send: type() completed (timeout={type_timeout_ms/1000:.1f}s)")
-                            except Exception as type_err:
-                                self._log(f"send: type() failed with timeout {type_timeout_ms/1000:.1f}s (err={type_err})")
-                                raise
-                else:
-                    # 尝试 fill
-                    try:
-                        await asyncio.wait_for(tb.fill(prompt), timeout=15)
-                        self._log(f"send: used fill() (prompt_len={len(prompt)})")
-                    except Exception as fill_err:
-                        # fill 失败，fallback 到 type
-                        self._log(f"send: fill() failed, trying type() (err={fill_err})")
-                        # Playwright 的 type() 需要显式传递 timeout 参数（毫秒）
-                        type_timeout_ms = int(min(90000, max(20000, len(prompt) * 3 + 15000)))
-                        await tb.type(prompt, delay=3, timeout=type_timeout_ms)
-                        self._log(f"send: used type() (prompt_len={len(prompt)}, timeout={type_timeout_ms/1000:.1f}s)")
-                
-                # 验证输入框内容是否完整（关键步骤，但添加超时保护）
-                self._log(f"send: verifying content (prompt_len={len(prompt)})...")
-                await asyncio.sleep(0.5)  # 等待内容填充完成
+                        # 注入后必须触发 input 事件，否则发送按钮可能不亮
+                        await asyncio.wait_for(
+                            tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
+                            timeout=3.0
+                        )
+                        self._log("send: injected via JS + triggered input event")
+                    except Exception as js_err:
+                        self._log(f"send: JS injection also failed: {js_err}")
+                        raise  # 如果 JS 注入也失败，抛出异常触发重试
+
+                await asyncio.sleep(0.5)
+
+                # --- 验证内容 ---
+                # 获取内容用于验证
                 try:
-                    # 尝试多种方法获取输入框内容，每个操作都有超时保护
-                    actual_content = ""
+                    actual = await asyncio.wait_for(tb.inner_text(), timeout=3)
+                except Exception:
                     try:
-                        # 方法1: input_value (适用于 textarea/input)，添加超时
-                        actual_content = await asyncio.wait_for(tb.input_value(), timeout=3)
-                    except:
-                        try:
-                            # 方法2: inner_text (适用于 contenteditable div)，添加超时
-                            actual_content = await asyncio.wait_for(tb.inner_text(), timeout=3)
-                        except:
-                            try:
-                                # 方法3: text_content (备用)，添加超时
-                                actual_content = await asyncio.wait_for(tb.text_content(), timeout=3) or ""
-                            except:
-                                # 如果所有方法都失败，尝试通过 evaluate 获取
-                                try:
-                                    actual_content = await asyncio.wait_for(
-                                        tb.evaluate("el => el.textContent || el.value || ''"), timeout=3
-                                    ) or ""
-                                except:
-                                    pass
-                    
-                    actual_clean = (actual_content or "").strip()
-                    prompt_clean = prompt.strip()
-                    
-                    self._log(f"send: verification result - expected_len={len(prompt_clean)}, actual_len={len(actual_clean)}")
-                    
-                    # 比较长度：实际内容应该至少是期望内容的80%
-                    if len(actual_clean) < len(prompt_clean) * 0.8:
-                        self._log(f"send: content mismatch! expected_len={len(prompt_clean)}, actual_len={len(actual_clean)}")
-                        self._log(f"send: expected_preview: {prompt_clean[:200]}...")
-                        self._log(f"send: actual_preview: {actual_clean[:200]}...")
-                        if attempt == 0:
-                            self._log("send: retrying due to content mismatch...")
-                            continue  # 重试一次
-                        else:
-                            await self.save_artifacts("send_content_mismatch")
-                            raise RuntimeError(
-                                f"send: prompt not fully entered after 2 attempts. "
-                                f"expected_len={len(prompt_clean)}, actual_len={len(actual_clean)}, "
-                                f"actual_preview={actual_clean[:200]}"
-                            )
-                    else:
-                        self._log(f"send: content verified OK (expected_len={len(prompt_clean)}, actual_len={len(actual_clean)})")
-                        prompt_sent = True
-                        break
-                except RuntimeError:
-                    raise  # 重新抛出 RuntimeError
-                except Exception as verify_err:
-                    self._log(f"send: verification failed (err={verify_err}), but continuing (may be false negative)")
-                    # 验证失败可能是方法问题，不是内容问题，继续执行
+                        actual = await asyncio.wait_for(tb.text_content(), timeout=3) or ""
+                    except Exception:
+                        actual = ""
+                
+                actual_clean = (actual or "").strip()
+                prompt_clean = prompt.strip()
+                
+                if len(actual_clean) < len(prompt_clean) * 0.8:
+                    self._log(f"send: mismatch (expected~={len(prompt_clean)}, actual={len(actual_clean)}). Retrying...")
+                    continue  # 触发下一次重试
+                else:
+                    self._log(f"send: content verified OK (len={len(actual_clean)})")
                     prompt_sent = True
                     break
                     
-            except asyncio.TimeoutError as e:
-                if attempt == 1:  # 最后一次尝试失败
-                    await self.save_artifacts("send_timeout")
-                    raise RuntimeError(f"send: timeout after 2 attempts. err={e}")
-                self._log(f"send: attempt {attempt+1} timeout, retrying... (err={e})")
-                await asyncio.sleep(0.5)
             except Exception as e:
-                if attempt == 1:  # 最后一次尝试失败
-                    await self.save_artifacts("send_hang_type")
-                    raise RuntimeError(f"send: failed after 2 attempts. err={e}")
-                self._log(f"send: attempt {attempt+1} failed, retrying... (err={e})")
-                await asyncio.sleep(0.5)
+                self._log(f"send: attempt {attempt+1} error: {e}")
+                await asyncio.sleep(1)
 
         if not prompt_sent:
-            raise RuntimeError("send: failed to send prompt after all attempts")
+            raise RuntimeError("send: failed to enter prompt after retries")
 
-        # arm input events
+        # 4. --- [关键修复] 发送逻辑升级 ---
+        self._log("send: triggering send...")
+
+        # 步骤 1: 尝试 Enter (最快)
         try:
-            await asyncio.wait_for(self._arm_input_events(tb), timeout=10)
+            await tb.press("Enter", timeout=3000)
+            self._log("send: Enter pressed")
+        except Exception:
+            pass
+        
+        # 给一点反应时间，如果 Enter 生效了，页面会刷新，下面的逻辑其实无害
+        await asyncio.sleep(0.5)
+
+        # 步骤 2: 尝试 Control+Enter (日志证明这是救世主)
+        # 很多时候 Enter 只是换行，Ctrl+Enter 才是强制提交
+        try:
+            self._log("send: trying Control+Enter (reliable fallback)...")
+            await tb.press("Control+Enter", timeout=3000)
+            await asyncio.sleep(0.5)
+            self._log("send: Control+Enter pressed")
         except Exception:
             pass
 
-        # 优化：优先使用回车键（更快、更稳、更像人类）
-        # 大多数 RPA 场景下，Enter 键比点击按钮更像人类且更稳
-        self._log("send: pressing Enter directly (fast path)...")
-        try:
-            await asyncio.wait_for(tb.press("Enter"), timeout=3)
-            self._log("send: Enter pressed successfully")
-            return  # 发送成功直接返回，不再找按钮
-        except Exception as enter_err:
-            self._log(f"send: Enter failed, trying send button (err={enter_err})")
-
-        # 备选：如果回车失败，尝试点击发送按钮（缩短超时）
+        # 步骤 3: 最后才找按钮 (最慢，最容易失败)
+        # 只有当前面两个都不行时，才去 DOM 里挖按钮
         for send_sel in self.SEND_BTN:
             try:
                 btn = frame.locator(send_sel).first
-                if await btn.count() > 0:
-                    try:
-                        await btn.scroll_into_view_if_needed(timeout=1000)
-                    except Exception:
-                        pass
-                    if await btn.is_visible(timeout=1000):  # 缩短可见性检查超时
-                        self._log(f"send: try click send button {send_sel}")
-                        await asyncio.wait_for(btn.click(), timeout=3.0)  # 缩短点击超时：15秒 -> 3秒
-                        self._log(f"send: clicked send button {send_sel}")
-                        return
+                if await btn.is_visible(timeout=1000):
+                    self._log(f"send: clicking send button {send_sel}...")
+                    await btn.click(timeout=3000)
+                    self._log(f"send: clicked send button {send_sel}")
+                    return
             except Exception:
                 continue
-
-        # 最后兜底：Control+Enter
-        self._log("send: send button not found/click failed, fallback Control+Enter")
-        try:
-            await tb.press("Control+Enter")
-        except Exception:
-            raise RuntimeError("send: all send methods failed (Enter, button click, Control+Enter)")
+        
+        # 如果所有方法都尝试过了，不报错（因为 Enter 或 Control+Enter 可能已经生效）
+        self._log("send: all send methods attempted (Enter/Control+Enter/Button)")
 
     async def ask(self, prompt: str, timeout_s: int = 240) -> Tuple[str, str]:
         """
