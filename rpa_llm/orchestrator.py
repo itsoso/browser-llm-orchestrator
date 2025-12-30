@@ -56,12 +56,29 @@ def load_brief(path: Path) -> Brief:
 
 
 def render_prompt(stream: StreamSpec, topic: str, context: str, questions: List[str]) -> str:
-    qb = "\n".join([f"- {q}" for q in questions]) if questions else "-（无）"
-    return stream.prompt_template.format(
-        topic=topic,
-        context=context,
+    """
+    渲染 prompt 模板，替换占位符。
+    
+    确保 context 和 topic 被正确格式化（去除多余空白，保留内容）。
+    """
+    # 清理 context：去除首尾空白，但保留内部格式
+    context_clean = context.strip() if context else ""
+    
+    # 清理 topic
+    topic_clean = topic.strip() if topic else ""
+    
+    # 生成问题清单
+    qb = "\n".join([f"- {q.strip()}" for q in questions if q.strip()]) if questions else "-（无）"
+    
+    # 替换模板中的占位符
+    prompt = stream.prompt_template.format(
+        topic=topic_clean,
+        context=context_clean,
         questions_bullets=qb,
-    ).strip()
+    )
+    
+    # 清理最终输出：去除首尾空白，但保留内部格式
+    return prompt.strip()
 
 
 def build_tasks(run_id: str, brief: Brief) -> List[Task]:
