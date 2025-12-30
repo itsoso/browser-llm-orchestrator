@@ -18,18 +18,22 @@ class ChatGPTAdapter(SiteAdapter):
     # 可定制入口：建议用专用对话 URL（https://chatgpt.com/c/<id>）以提升稳定性
     base_url = os.environ.get("CHATGPT_ENTRY_URL", "https://chatgpt.com/")
 
-    # 输入框：优先语义化（placeholder/role），css 只作兜底
+    # 输入框：优化后的优先级（适配当前 ChatGPT ProseMirror 实现）
+    # 当前 ChatGPT (GPT-4o/Canvas) 使用 contenteditable div，优先匹配新版
     TEXTBOX_CSS = [
+        # 新版 ChatGPT (ProseMirror) - 最精准和常用
+        'div[id="prompt-textarea"]',  # 最精准的 ID 选择器
+        'div[contenteditable="true"]',  # 最通用的属性（命中率 99%）
+        'div[role="textbox"][contenteditable="true"]',  # 语义化 + 属性
+        'div[contenteditable="true"][role="textbox"]',  # 属性 + 语义化
+        # 旧版 ChatGPT 兼容（如果还在使用）
         'textarea[data-testid="prompt-textarea"]',
         "textarea#prompt-textarea",
         'textarea[placeholder*="询问"]',
         'textarea[placeholder*="Message"]',
-        'div[role="textbox"][contenteditable="true"]',
-        'div[contenteditable="true"][role="textbox"]',
+        # 通用兜底
         '[role="textbox"]',
         "textarea",
-        # 最后兜底（容易波动，但有时只能靠它）
-        'div[contenteditable="true"]',
     ]
 
     # 发送按钮：优先 data-testid，其次 submit
@@ -129,22 +133,56 @@ class ChatGPTAdapter(SiteAdapter):
 
     async def _find_textbox_any_frame(self) -> Optional[Tuple[Locator, Frame, str]]:
         """
-        返回 (textbox_locator, frame, how) 或 None
-        优先：placeholder/role（更稳）
-        其次：CSS
+        优化版：优先检查主 Frame，使用最快选择器，减少 await 开销
         
-        性能优化：使用超时保护，避免长时间等待
+        99% 的情况下输入框在 main_frame 中，优先检查可以大幅提升性能
         """
+        mf = self.page.main_frame
+        
+        # 1. 优先检查主 Frame（最快路径）
+        # 直接使用最可能的选择器，避免遍历所有 iframe
+        try:
+            # 并行检查最可能的两个选择器（id 和 contenteditable）
+            # 使用 asyncio.gather 并行执行，更快
+            tasks = [
+                self._try_find_in_frame(mf, 'div[id="prompt-textarea"]', "main_frame_id"),
+                self._try_find_in_frame(mf, 'div[contenteditable="true"]', "main_frame_contenteditable"),
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 返回第一个成功的结果
+            for result in results:
+                if isinstance(result, tuple) and result is not None:
+                    return result
+        except Exception:
+            pass
+        
+        # 2. 如果主 Frame 没找到，再检查其他选择器（role/placeholder）
+        try:
+            # role=textbox（快速检查）
+            loc = mf.get_by_role("textbox").first
+            try:
+                await loc.wait_for(state="attached", timeout=500)
+                if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
+                    return loc, mf, "main_frame_role"
+            except (asyncio.TimeoutError, Exception):
+                pass
+        except Exception:
+            pass
+        
+        # 3. 如果主 Frame 都没找到，再遍历所有 frame（兜底逻辑）
         ph = re.compile(r"(询问|Message|Ask|anything|输入)", re.I)
-
+        
         for frame in self._frames_in_priority():
-            # placeholder 优先（快速检查，不等待 count）
+            # 跳过 main_frame（已经检查过了）
+            if frame == mf:
+                continue
+                
+            # placeholder 优先（快速检查）
             try:
                 loc = frame.get_by_placeholder(ph).first
-                # 使用 wait_for 而不是 count + is_visible，更快
                 try:
                     await loc.wait_for(state="attached", timeout=500)
-                    # 快速检查可见性，不等待 scroll
                     if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
                         return loc, frame, "get_by_placeholder"
                 except (asyncio.TimeoutError, Exception):
@@ -168,7 +206,6 @@ class ChatGPTAdapter(SiteAdapter):
             for sel in self.TEXTBOX_CSS:
                 try:
                     loc = frame.locator(sel).first
-                    # 使用 wait_for 快速检查
                     try:
                         await loc.wait_for(state="attached", timeout=500)
                         if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
@@ -178,6 +215,17 @@ class ChatGPTAdapter(SiteAdapter):
                 except Exception:
                     continue
 
+        return None
+    
+    async def _try_find_in_frame(self, frame: Frame, selector: str, how: str) -> Optional[Tuple[Locator, Frame, str]]:
+        """辅助方法：在指定 frame 中尝试查找选择器"""
+        try:
+            loc = frame.locator(selector).first
+            await loc.wait_for(state="attached", timeout=500)
+            if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
+                return loc, frame, how
+        except (asyncio.TimeoutError, Exception):
+            pass
         return None
 
     async def _ready_check_textbox(self) -> bool:
@@ -576,7 +624,17 @@ class ChatGPTAdapter(SiteAdapter):
         except Exception:
             pass
 
-        # click send button first (more reliable than Enter for ChatGPT)
+        # 优化：优先使用回车键（更快、更稳、更像人类）
+        # 大多数 RPA 场景下，Enter 键比点击按钮更像人类且更稳
+        self._log("send: pressing Enter directly (fast path)...")
+        try:
+            await asyncio.wait_for(tb.press("Enter"), timeout=3)
+            self._log("send: Enter pressed successfully")
+            return  # 发送成功直接返回，不再找按钮
+        except Exception as enter_err:
+            self._log(f"send: Enter failed, trying send button (err={enter_err})")
+
+        # 备选：如果回车失败，尝试点击发送按钮（缩短超时）
         for send_sel in self.SEND_BTN:
             try:
                 btn = frame.locator(send_sel).first
@@ -585,20 +643,20 @@ class ChatGPTAdapter(SiteAdapter):
                         await btn.scroll_into_view_if_needed(timeout=1000)
                     except Exception:
                         pass
-                    if await btn.is_visible():
+                    if await btn.is_visible(timeout=1000):  # 缩短可见性检查超时
                         self._log(f"send: try click send button {send_sel}")
-                        await asyncio.wait_for(btn.click(), timeout=15)
+                        await asyncio.wait_for(btn.click(), timeout=3.0)  # 缩短点击超时：15秒 -> 3秒
                         self._log(f"send: clicked send button {send_sel}")
                         return
             except Exception:
                 continue
 
-        # fallback: Enter
-        self._log("send: send button not found/click failed, fallback Enter")
+        # 最后兜底：Control+Enter
+        self._log("send: send button not found/click failed, fallback Control+Enter")
         try:
-            await asyncio.wait_for(tb.press("Enter"), timeout=5)
-        except Exception:
             await tb.press("Control+Enter")
+        except Exception:
+            raise RuntimeError("send: all send methods failed (Enter, button click, Control+Enter)")
 
     async def ask(self, prompt: str, timeout_s: int = 240) -> Tuple[str, str]:
         """

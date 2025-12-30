@@ -12,6 +12,12 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 
 from ..utils import beijing_now_iso, utc_now_iso
 
+# 可选：集成 playwright-stealth 抗风控
+try:
+    from playwright_stealth import stealth_async
+except ImportError:
+    stealth_async = None
+
 
 class SiteAdapter(ABC):
     """
@@ -98,6 +104,18 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         self._page = pages[0] if pages else await self._context.new_page()
 
         # -------------------------
+        # Anti-detection: 注入 Stealth 脚本（降低 Cloudflare 触发率）
+        # -------------------------
+        if stealth_async:
+            try:
+                await stealth_async(self._page)
+                print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode enabled", flush=True)
+            except Exception as e:
+                print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode failed (non-fatal): {e}", flush=True)
+        else:
+            print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode not available (install: pip install playwright-stealth)", flush=True)
+
+        # -------------------------
         # Performance diagnostics
         # -------------------------
         self._perf = {
@@ -142,18 +160,48 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         self._page.on("requestfailed", _on_request_failed)
 
         # Route: block heavy resources + count requests
-        # 性能优化：快速判断，减少处理时间
+        # 性能优化：激进拦截监控/统计代码，减少页面加载时间
+        # 拦截关键词列表：监控、统计、广告服务
+        _block_keywords = [
+            "sentry",           # 错误监控
+            "statsig",          # 统计分析
+            "segment",          # 数据收集
+            "intercom",         # 客服聊天
+            "clarity",          # 用户行为分析
+            "google-analytics", # Google 分析
+            "analytics",        # 通用分析
+            "doubleclick",      # Google 广告
+            "adservice",        # 广告服务
+            "googletagmanager", # GTM
+            "facebook.net",     # Facebook 追踪
+            "hotjar",           # 热力图分析
+            "mixpanel",         # 产品分析
+            "amplitude",        # 产品分析
+            "heap",             # 产品分析
+            "fullstory",        # 会话回放
+            "logrocket",        # 会话回放
+            "datadog",          # 监控
+            "newrelic",         # 监控
+        ]
+        
         async def _route_handler(route, request):
             try:
                 rt = request.resource_type
-                # 快速路径：直接拦截图片/媒体/字体，不统计
+                url = request.url.lower()  # 转换为小写以便匹配
+                
+                # 快速路径1：拦截图片/媒体/字体
                 if rt in ("image", "media", "font"):
                     self._perf["requests"]["aborted"] += 1
                     await route.abort()
                     return
                 
+                # 快速路径2：拦截监控/统计/广告服务（激进拦截）
+                if any(keyword in url for keyword in _block_keywords):
+                    self._perf["requests"]["aborted"] += 1
+                    await route.abort()
+                    return
+                
                 # 其他资源：继续并统计（异步，不阻塞）
-                url = request.url
                 self._perf["requests"]["total"] += 1
                 by_type = self._perf["requests"]["by_type"]
                 by_type[rt] = by_type.get(rt, 0) + 1
