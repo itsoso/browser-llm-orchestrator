@@ -10,7 +10,7 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
-from ..utils import utc_now_iso
+from ..utils import beijing_now_iso, utc_now_iso
 
 
 class SiteAdapter(ABC):
@@ -174,7 +174,7 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             cerr = self._perf["console"]["errors"]
             rerr = self._perf["requests"]["errors"]
             print(
-                f"[{utc_now_iso()}] [{self.site_id}] goto(commit) dur={dur:.2f}s req_total={total} aborted={aborted} "
+                f"[{beijing_now_iso()}] [{self.site_id}] goto(commit) dur={dur:.2f}s req_total={total} aborted={aborted} "
                 f"console_err={cerr} req_err={rerr}",
                 flush=True,
             )
@@ -240,29 +240,29 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """
         await self.save_artifacts("manual_checkpoint")
 
-        print(f"\n[{utc_now_iso()}] [{self.site_id}] MANUAL CHECKPOINT: {reason}", flush=True)
-        print(f"[{utc_now_iso()}] 请在打开的浏览器中完成操作（Cloudflare/登录/验证码/弹窗等）。", flush=True)
+        print(f"\n[{beijing_now_iso()}] [{self.site_id}] MANUAL CHECKPOINT: {reason}", flush=True)
+        print(f"[{beijing_now_iso()}] 请在打开的浏览器中完成操作（Cloudflare/登录/验证码/弹窗等）。", flush=True)
 
         if ready_check is not None:
-            print(f"[{utc_now_iso()}] [{self.site_id}] auto-wait up to {max_wait_s}s ...", flush=True)
+            print(f"[{beijing_now_iso()}] [{self.site_id}] auto-wait up to {max_wait_s}s ...", flush=True)
             loop = asyncio.get_event_loop()
             t0 = loop.time()
             hb = t0
             while (loop.time() - t0) < max_wait_s:
                 try:
                     if await ready_check():
-                        print(f"[{utc_now_iso()}] [{self.site_id}] auto-continue: ready condition met.", flush=True)
+                        print(f"[{beijing_now_iso()}] [{self.site_id}] auto-continue: ready condition met.", flush=True)
                         return
                 except Exception:
                     pass
 
                 if (loop.time() - hb) >= 5:
-                    print(f"[{utc_now_iso()}] [{self.site_id}] auto-waiting ...", flush=True)
+                    print(f"[{beijing_now_iso()}] [{self.site_id}] auto-waiting ...", flush=True)
                     hb = loop.time()
 
                 await asyncio.sleep(1.0)
 
-        print(f"[{utc_now_iso()}] 完成后回到终端按 Enter 继续。\n", flush=True)
+        print(f"[{beijing_now_iso()}] 完成后回到终端按 Enter 继续。\n", flush=True)
         await asyncio.to_thread(input, "Press Enter to continue...")
 
     async def first_visible(self, selectors: List[str], timeout_ms: int = 5000):

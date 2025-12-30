@@ -14,7 +14,7 @@ from .adapters import create_adapter
 from .driver_client import run_task as driver_run_task
 from .models import Brief, ModelResult, StreamSpec, Task
 from .prompts import SynthesisPromptConfig, build_dual_model_arbitration_prompt
-from .utils import ensure_dir, utc_now_iso
+from .utils import beijing_now_iso, ensure_dir, utc_now_iso
 from .vault import (
     build_run_index_note,
     make_model_output_filename,
@@ -102,7 +102,7 @@ async def run_site_worker(
         durations: List[float] = []
 
         print(
-            f"[{utc_now_iso()}] [{site_id}] worker(driver) start | tasks={total} | driver={driver_url} "
+            f"[{beijing_now_iso()}] [{site_id}] worker(driver) start | tasks={total} | driver={driver_url} "
             f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
             flush=True,
         )
@@ -116,7 +116,7 @@ async def run_site_worker(
             eta = avg * (total - idx + 1) if avg is not None else None
 
             print(
-                f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} start(driver) | stream={t.stream_id} "
+                f"[{beijing_now_iso()}] [{site_id}] task {idx}/{total} start(driver) | stream={t.stream_id} "
                 f"| local={started_local} | utc={started_utc}"
                 + (f" | avg={_fmt_secs(avg)} | eta~{_fmt_secs(eta)}" if avg is not None else ""),
                 flush=True,
@@ -129,11 +129,11 @@ async def run_site_worker(
                 url = payload.get("url") or ""
                 err = payload.get("error")
                 if not ok and err:
-                    print(f"[{utc_now_iso()}] [{site_id}] driver error: {err}", flush=True)
+                    print(f"[{beijing_now_iso()}] [{site_id}] driver error: {err}", flush=True)
             except Exception as e:
                 ok = False
                 answer, url, err = "", "", str(e)
-                print(f"[{utc_now_iso()}] [{site_id}] driver exception: {err}", flush=True)
+                print(f"[{beijing_now_iso()}] [{site_id}] driver exception: {err}", flush=True)
 
             t1 = time.perf_counter()
             ended_utc = utc_now_iso()
@@ -145,7 +145,7 @@ async def run_site_worker(
             eta2 = avg2 * (total - idx)
 
             print(
-                f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} done(driver) | stream={t.stream_id} | ok={ok} "
+                f"[{beijing_now_iso()}] [{site_id}] task {idx}/{total} done(driver) | stream={t.stream_id} | ok={ok} "
                 f"| dur={_fmt_secs(duration_s)} | avg={_fmt_secs(avg2)} | eta~{_fmt_secs(eta2)} "
                 f"| local_end={ended_local} | utc_end={ended_utc}",
                 flush=True,
@@ -204,7 +204,7 @@ async def run_site_worker(
             write_markdown(out_path, fm, body)
 
         print(
-            f"[{utc_now_iso()}] [{site_id}] worker(driver) end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            f"[{beijing_now_iso()}] [{site_id}] worker(driver) end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
             flush=True,
         )
         return results
@@ -221,7 +221,7 @@ async def run_site_worker(
         adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=site_artifacts, headless=headless)
 
         print(
-            f"[{utc_now_iso()}] [{site_id}] worker(local) start | tasks={total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            f"[{beijing_now_iso()}] [{site_id}] worker(local) start | tasks={total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
             flush=True,
         )
 
@@ -235,7 +235,7 @@ async def run_site_worker(
                 eta = avg * (total - idx + 1) if avg is not None else None
 
                 print(
-                    f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} start | stream={t.stream_id} "
+                    f"[{beijing_now_iso()}] [{site_id}] task {idx}/{total} start | stream={t.stream_id} "
                     f"| local={started_local} | utc={started_utc}"
                     + (f" | avg={_fmt_secs(avg)} | eta~{_fmt_secs(eta)}" if avg is not None else ""),
                     flush=True,
@@ -260,7 +260,7 @@ async def run_site_worker(
                 eta2 = avg2 * (total - idx)
 
                 print(
-                    f"[{utc_now_iso()}] [{site_id}] task {idx}/{total} done | stream={t.stream_id} | ok={ok} "
+                    f"[{beijing_now_iso()}] [{site_id}] task {idx}/{total} done | stream={t.stream_id} | ok={ok} "
                     f"| dur={_fmt_secs(duration_s)} | avg={_fmt_secs(avg2)} | eta~{_fmt_secs(eta2)} "
                     f"| local_end={ended_local} | utc_end={ended_utc}",
                     flush=True,
@@ -318,7 +318,7 @@ async def run_site_worker(
                 write_markdown(out_path, fm, body)
 
         print(
-            f"[{utc_now_iso()}] [{site_id}] worker(local) end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+            f"[{beijing_now_iso()}] [{site_id}] worker(local) end | done={len(results)}/{total} | local={_now_local_iso()} | utc={_now_utc_iso()}",
             flush=True,
         )
         return results
@@ -365,7 +365,7 @@ async def run_synthesis_and_final(
     prompt = build_dual_model_arbitration_prompt(brief, results, cfg)
 
     print(
-        f"[{utc_now_iso()}] [synthesis] start | arbitrator={arbitrator_site} | local={_now_local_iso()} | utc={_now_utc_iso()}",
+        f"[{beijing_now_iso()}] [synthesis] start | arbitrator={arbitrator_site} | local={_now_local_iso()} | utc={_now_utc_iso()}",
         flush=True,
     )
     t0 = time.perf_counter()
@@ -398,7 +398,7 @@ async def run_synthesis_and_final(
     ended_local = _now_local_iso()
     dur = max(0.0, t1 - t0)
     print(
-        f"[{utc_now_iso()}] [synthesis] done | dur={_fmt_secs(dur)} | local_end={ended_local} | utc_end={ended_utc}",
+        f"[{beijing_now_iso()}] [synthesis] done | dur={_fmt_secs(dur)} | local_end={ended_local} | utc_end={ended_utc}",
         flush=True,
     )
 
@@ -477,7 +477,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
 
     total_tasks = len(tasks)
     print(
-        f"[{utc_now_iso()}] [run_all] start | sites={len(site_map)} tasks={total_tasks} "
+        f"[{beijing_now_iso()}] [run_all] start | sites={len(site_map)} tasks={total_tasks} "
         f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
         flush=True,
     )
@@ -508,7 +508,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
 
     for item in all_results_nested:
         if isinstance(item, Exception):
-            print(f"[{utc_now_iso()}] [run_all] site worker failed: {item}", flush=True)
+            print(f"[{beijing_now_iso()}] [run_all] site worker failed: {item}", flush=True)
             continue
         all_results.extend(item)
 
@@ -524,11 +524,11 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
             headless=headless,
         )
     except Exception as e:
-        print(f"[{utc_now_iso()}] [synthesis] failed: {e}", flush=True)
+        print(f"[{beijing_now_iso()}] [synthesis] failed: {e}", flush=True)
 
     global_t1 = time.perf_counter()
     print(
-        f"[{utc_now_iso()}] [run_all] end | results={len(all_results)}/{total_tasks} "
+        f"[{beijing_now_iso()}] [run_all] end | results={len(all_results)}/{total_tasks} "
         f"| dur={_fmt_secs(max(0.0, global_t1 - global_t0))} "
         f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
         flush=True,

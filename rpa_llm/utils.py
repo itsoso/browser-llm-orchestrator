@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def beijing_now_iso() -> str:
+    """返回北京时间（UTC+8）的 ISO 格式字符串，用于日志输出"""
+    beijing_tz = timezone(timedelta(hours=8))
+    return datetime.now(beijing_tz).replace(microsecond=0).isoformat()
 
 
 def slugify(text: str, max_len: int = 60) -> str:

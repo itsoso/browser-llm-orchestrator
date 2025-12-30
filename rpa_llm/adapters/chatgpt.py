@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 from playwright.async_api import Frame, Locator
 
-from ..utils import utc_now_iso
+from ..utils import beijing_now_iso
 from .base import SiteAdapter
 
 
@@ -90,7 +90,7 @@ class ChatGPTAdapter(SiteAdapter):
         self._variant_set = False
 
     def _log(self, msg: str) -> None:
-        print(f"[{utc_now_iso()}] [{self.site_id}] {msg}", flush=True)
+        print(f"[{beijing_now_iso()}] [{self.site_id}] {msg}", flush=True)
 
     def _desired_variant(self) -> str:
         # CHATGPT_VARIANT=instant|thinking|pro

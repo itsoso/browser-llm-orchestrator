@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from .adapters import create_adapter
+from .utils import beijing_now_iso
 
 
 def utc_iso() -> str:
