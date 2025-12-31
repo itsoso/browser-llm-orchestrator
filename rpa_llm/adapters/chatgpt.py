@@ -467,78 +467,269 @@ class ChatGPTAdapter(SiteAdapter):
         for attempt in range(2):
             try:
                 if attempt > 0:
-                    self._log(f"send: attempt {attempt+1}, clearing textbox...")
+                    self._log(f"send: attempt {attempt+1}, re-finding textbox and clearing...")
+                    # 重试时重新查找元素（元素可能已变化）
+                    await asyncio.sleep(1.5)  # 等待页面稳定
+                    found_retry = await self._find_textbox_any_frame()
+                    if found_retry:
+                        tb, frame, how = found_retry
+                        self._log(f"send: re-found textbox via {how}")
+                    else:
+                        self._log("send: textbox not found in retry, using original")
                 
-                # --- [关键修复] 强制清空逻辑 ---
+                # --- [关键修复] 强制清空逻辑（每次输入前都必须清空）---
                 # 不要用 tb.fill("")，这在 div 上不稳定。直接用 JS 清空 DOM。
+                # 必须在每次输入前清空，避免之前失败的输入影响
+                self._log(f"send: clearing textbox before input (attempt {attempt+1})...")
                 try:
                     # 确保元素可见和可交互，然后执行 evaluate（带超时）
-                    await tb.wait_for(state="visible", timeout=5000)
-                    await asyncio.wait_for(
-                        tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; }"),
-                        timeout=5.0
-                    )
-                    await asyncio.sleep(0.2)
-                    self._log("send: cleared via JS")
+                    # 使用 "attached" 状态更宽松，因为元素可能暂时不可见但已附加到 DOM
+                    await tb.wait_for(state="attached", timeout=10000)
+                    
+                    # 多次清空，确保彻底清除（React 状态可能需要多次更新）
+                    for clear_attempt in range(3):
+                        await asyncio.wait_for(
+                            tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; el.textContent = ''; }"),
+                            timeout=5.0
+                        )
+                        # 触发 input 事件，确保 React 状态更新
+                        await tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))")
+                        await asyncio.sleep(0.2)
+                        
+                        # 验证是否真的清空了
+                        check_empty = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                        if not check_empty.strip():
+                            self._log(f"send: cleared successfully (attempt {clear_attempt+1})")
+                            break
+                        self._log(f"send: clear attempt {clear_attempt+1}, still has content, retrying clear...")
+                    
+                    # 最终验证清空结果
+                    final_check = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                    if final_check.strip():
+                        self._log(f"send: warning - textbox still has content after clear: '{final_check[:50]}...'")
+                    else:
+                        self._log("send: textbox cleared successfully")
+                    
+                    await asyncio.sleep(0.5)  # 等待 React 状态完全更新
                 except Exception as e:
                     self._log(f"send: JS clear failed: {e}")
-                    # 清空失败不致命，继续尝试输入
+                    # 清空失败不致命，继续尝试输入（但可能会影响结果）
 
                 # --- 输入内容 ---
                 self._log(f"send: writing prompt ({len(prompt)} chars)...")
                 
                 # 策略 A: 优先尝试 type (模拟键盘，最稳，触发 React 事件)
                 # 之前的 fill 容易报错 "Node is not input"，改用 type
+                type_success = False
                 try:
+                    # 确保元素可见和可交互，然后执行 type
+                    await tb.wait_for(state="attached", timeout=10000)
+                    # 确保元素有焦点
+                    try:
+                        await tb.focus(timeout=3000)
+                    except Exception:
+                        pass  # focus 失败不致命
+                    
                     # 设置超时（毫秒），根据长度动态调整
-                    timeout_ms = max(30000, len(prompt) * 10)
+                    # 每字符至少 50ms，最小 60 秒（长 prompt 需要更多时间）
+                    timeout_ms = max(60000, len(prompt) * 50)
                     await tb.type(prompt, delay=0, timeout=timeout_ms)
                     self._log(f"send: typed prompt (timeout={timeout_ms/1000:.1f}s)")
+                    type_success = True
                 except Exception as e:
-                    self._log(f"send: type() failed ({e}), trying JS injection...")
-                    # 策略 B: JS 注入 (最快，但可能不触发事件，需要后续处理)
-                    try:
-                        # 确保元素可见和可交互
-                        await tb.wait_for(state="visible", timeout=5000)
-                        # JSON.stringify 处理转义字符
-                        import json
-                        js_code = f"el => el.innerText = {json.dumps(prompt)}"
-                        await asyncio.wait_for(
-                            tb.evaluate(js_code),
-                            timeout=5.0
-                        )
-                        # 注入后必须触发 input 事件，否则发送按钮可能不亮
-                        await asyncio.wait_for(
-                            tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
-                            timeout=3.0
-                        )
-                        self._log("send: injected via JS + triggered input event")
-                    except Exception as js_err:
-                        self._log(f"send: JS injection also failed: {js_err}")
-                        raise  # 如果 JS 注入也失败，抛出异常触发重试
+                    error_str = str(e)
+                    # 检查是否是超时错误
+                    if "Timeout" in error_str or "timeout" in error_str.lower():
+                        self._log(f"send: type() timeout ({e}), checking partial input...")
+                        # 超时可能已经输入了一部分，先检查当前内容
+                        try:
+                            # 等待一下，让 React 状态更新
+                            await asyncio.sleep(1.0)
+                            partial = await asyncio.wait_for(tb.inner_text(), timeout=3) or ""
+                            partial_len = len(partial.strip())
+                            expected_len = len(prompt.strip())
+                            partial_ratio = partial_len / expected_len if expected_len > 0 else 0
+                            self._log(f"send: partial input detected (len={partial_len}/{expected_len}, ratio={partial_ratio:.2%})")
+                            
+                            # 如果输入了超过 95%，可能是超时但内容已完整，等待一下再验证
+                            if partial_ratio >= 0.95:
+                                self._log("send: partial input may be complete (>=95%), waiting for React update...")
+                                # 等待更长时间，确保输入完全完成
+                                await asyncio.sleep(2.0)  # 增加等待时间
+                                # 再次检查，确保内容完整
+                                final_check = await asyncio.wait_for(tb.inner_text(), timeout=3) or ""
+                                final_len = len(final_check.strip())
+                                final_ratio = final_len / expected_len if expected_len > 0 else 0
+                                
+                                # 检查开头和结尾是否匹配（防止中间截断）
+                                final_check_clean = final_check.strip()
+                                prompt_clean_check = prompt.strip()
+                                start_match = final_check_clean[:50].strip() == prompt_clean_check[:50].strip() if len(final_check_clean) >= 50 and len(prompt_clean_check) >= 50 else True
+                                end_match = final_check_clean[-50:].strip() == prompt_clean_check[-50:].strip() if len(final_check_clean) >= 50 and len(prompt_clean_check) >= 50 else True
+                                
+                                if final_ratio >= 0.95 and start_match and end_match:
+                                    self._log(f"send: confirmed complete after wait (len={final_len}, ratio={final_ratio:.2%}, start_match={start_match}, end_match={end_match})")
+                                    type_success = True  # 确认完整，继续验证
+                                else:
+                                    self._log(f"send: still incomplete after wait (len={final_len}, ratio={final_ratio:.2%}, start_match={start_match}, end_match={end_match}), will retry")
+                                    # 清空后抛出异常触发重试
+                                    try:
+                                        await tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; el.textContent = ''; }")
+                                        await tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))")
+                                        await asyncio.sleep(0.5)
+                                    except Exception:
+                                        pass
+                                    raise RuntimeError(f"type() timeout: partial input incomplete (ratio={final_ratio:.2%}, start_match={start_match}, end_match={end_match})")
+                            else:
+                                # 输入不足 95%，清空后尝试 JS 注入
+                                self._log(f"send: partial input insufficient (ratio={partial_ratio:.2%}), clearing and trying JS injection...")
+                                try:
+                                    await tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; el.textContent = ''; }")
+                                    await tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))")
+                                    await asyncio.sleep(0.3)
+                                except Exception:
+                                    pass
+                        except Exception as check_err:
+                            self._log(f"send: failed to check partial input: {check_err}")
+                            # 检查失败，清空后继续尝试 JS 注入
+                            try:
+                                await tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; el.textContent = ''; }")
+                            except Exception:
+                                pass
+                    
+                    if not type_success:
+                        self._log(f"send: type() failed ({e}), trying JS injection...")
+                        # 策略 B: JS 注入 (最快，但可能不触发事件，需要后续处理)
+                        try:
+                            # 确保元素可见和可交互
+                            await tb.wait_for(state="visible", timeout=5000)
+                            # JSON.stringify 处理转义字符
+                            import json
+                            js_code = f"el => el.innerText = {json.dumps(prompt)}"
+                            await asyncio.wait_for(
+                                tb.evaluate(js_code),
+                                timeout=5.0
+                            )
+                            # 注入后必须触发 input 事件，否则发送按钮可能不亮
+                            await asyncio.wait_for(
+                                tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
+                                timeout=3.0
+                            )
+                            self._log("send: injected via JS + triggered input event")
+                            type_success = True
+                        except Exception as js_err:
+                            self._log(f"send: JS injection also failed: {js_err}")
+                            raise  # 如果 JS 注入也失败，抛出异常触发重试
 
-                await asyncio.sleep(0.5)
+                # 等待输入完成和 React 状态更新
+                await asyncio.sleep(1.0)  # 增加等待时间，确保输入完全完成
 
                 # --- 验证内容 ---
-                # 获取内容用于验证
-                try:
-                    actual = await asyncio.wait_for(tb.inner_text(), timeout=3)
-                except Exception:
+                # 获取内容用于验证（多次尝试，确保读取到最新内容）
+                actual = ""
+                for verify_attempt in range(3):
                     try:
-                        actual = await asyncio.wait_for(tb.text_content(), timeout=3) or ""
+                        actual = await asyncio.wait_for(tb.inner_text(), timeout=3)
+                        if actual:
+                            break
                     except Exception:
-                        actual = ""
+                        try:
+                            actual = await asyncio.wait_for(tb.text_content(), timeout=3) or ""
+                            if actual:
+                                break
+                        except Exception:
+                            pass
+                    if verify_attempt < 2:
+                        await asyncio.sleep(0.8)  # 等待内容更新（增加等待时间）
                 
                 actual_clean = (actual or "").strip()
                 prompt_clean = prompt.strip()
                 
-                if len(actual_clean) < len(prompt_clean) * 0.8:
-                    self._log(f"send: mismatch (expected~={len(prompt_clean)}, actual={len(actual_clean)}). Retrying...")
-                    continue  # 触发下一次重试
-                else:
-                    self._log(f"send: content verified OK (len={len(actual_clean)})")
-                    prompt_sent = True
-                    break
+                # 更严格的验证：不仅检查长度，还检查关键内容
+                actual_len = len(actual_clean)
+                expected_len = len(prompt_clean)
+                len_ratio = actual_len / expected_len if expected_len > 0 else 0
+                
+                # 检查长度是否足够（至少 95%，允许少量格式差异）
+                if len_ratio < 0.95:
+                    self._log(f"send: content mismatch - expected={expected_len}, actual={actual_len}, ratio={len_ratio:.2%}")
+                    # 显示前 100 个字符用于调试
+                    preview = actual_clean[:100] if actual_clean else "(empty)"
+                    self._log(f"send: actual preview: {preview}...")
+                    
+                    # 如果实际内容明显少于预期，可能是读取时机问题，再等待并重新读取
+                    if len_ratio < 0.95:
+                        # 根据不完整程度决定等待时间
+                        if len_ratio < 0.5:
+                            wait_time = 2.0  # 内容很少，等待更长时间
+                        elif len_ratio < 0.8:
+                            wait_time = 1.5  # 内容中等，等待中等时间
+                        else:
+                            wait_time = 1.0  # 内容接近完整，等待较短时间
+                        
+                        self._log(f"send: content incomplete (ratio={len_ratio:.2%}), waiting {wait_time}s and re-reading...")
+                        await asyncio.sleep(wait_time)
+                        
+                        # 重新读取一次
+                        try:
+                            actual_retry = await asyncio.wait_for(tb.inner_text(), timeout=3) or ""
+                            actual_retry_clean = actual_retry.strip()
+                            actual_retry_len = len(actual_retry_clean)
+                            retry_ratio = actual_retry_len / expected_len if expected_len > 0 else 0
+                            
+                            if retry_ratio >= 0.95:
+                                # 重新读取后内容完整，使用新读取的内容
+                                actual_clean = actual_retry_clean
+                                actual_len = actual_retry_len
+                                len_ratio = retry_ratio
+                                self._log(f"send: re-read successful (len={actual_len}, ratio={retry_ratio:.2%})")
+                            else:
+                                self._log(f"send: re-read still incomplete (len={actual_retry_len}, ratio={retry_ratio:.2%})")
+                                # 如果重新读取后仍然不完整，必须重试
+                                len_ratio = retry_ratio  # 更新为最新的比例
+                        except Exception as re_read_err:
+                            self._log(f"send: re-read failed: {re_read_err}")
+                            # 读取失败，必须重试
+                    
+                    # 如果重新读取后仍然不完整，触发重试
+                    if len_ratio < 0.95:
+                        self._log(f"send: content still incomplete after re-read (ratio={len_ratio:.2%}), retrying...")
+                        # 重试前确保彻底清空（防止两段内容叠加）
+                        try:
+                            # 多次清空，确保彻底
+                            for clear_retry in range(3):
+                                await tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; el.textContent = ''; }")
+                                await tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))")
+                                await asyncio.sleep(0.2)
+                                # 验证是否清空
+                                check = await asyncio.wait_for(tb.inner_text(), timeout=1) or ""
+                                if not check.strip():
+                                    break
+                            await asyncio.sleep(0.5)
+                            self._log("send: cleared before retry")
+                        except Exception:
+                            pass
+                        continue  # 触发下一次重试
+                
+                # 额外检查：验证开头和结尾是否匹配（防止中间截断）
+                if actual_clean and prompt_clean:
+                    # 检查开头（前 50 个字符）
+                    actual_start = actual_clean[:50].strip()
+                    prompt_start = prompt_clean[:50].strip()
+                    if actual_start != prompt_start:
+                        self._log(f"send: content start mismatch - expected starts with '{prompt_start[:30]}...', got '{actual_start[:30]}...'")
+                        continue
+                    
+                    # 检查结尾（后 50 个字符）
+                    actual_end = actual_clean[-50:].strip()
+                    prompt_end = prompt_clean[-50:].strip()
+                    if actual_end != prompt_end:
+                        self._log(f"send: content end mismatch - expected ends with '...{prompt_end[-30:]}', got '...{actual_end[-30:]}'")
+                        continue
+                
+                self._log(f"send: content verified OK (len={actual_len}, ratio={len_ratio:.2%})")
+                prompt_sent = True
+                break
                     
             except Exception as e:
                 self._log(f"send: attempt {attempt+1} error: {e}")
@@ -586,7 +777,7 @@ class ChatGPTAdapter(SiteAdapter):
         # 如果所有方法都尝试过了，不报错（因为 Enter 或 Control+Enter 可能已经生效）
         self._log("send: all send methods attempted (Enter/Control+Enter/Button)")
 
-    async def ask(self, prompt: str, timeout_s: int = 240) -> Tuple[str, str]:
+    async def ask(self, prompt: str, timeout_s: int = 480) -> Tuple[str, str]:
         """
         发送 prompt 并等待回复。
         

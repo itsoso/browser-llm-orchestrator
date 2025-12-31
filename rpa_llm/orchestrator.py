@@ -109,7 +109,7 @@ async def run_site_worker(
     headless: bool = False,
     sem: asyncio.Semaphore | None = None,
     driver_url: str | None = None,
-    task_timeout_s: int = 240,
+    task_timeout_s: int = 480,
 ) -> List[ModelResult]:
     results: List[ModelResult] = []
     driver_url = (driver_url or "").strip() or None
@@ -202,17 +202,15 @@ async def run_site_worker(
             out_path = vault_paths["model"] / fname
             fm = {
                 "type": ["model_output"],
-                "created": res.created_utc,
+                "created": started_local,
                 "author": res.site_id,
                 "run_id": res.run_id,
                 "topic": res.topic,
                 "stream": f"{res.stream_id} | {res.stream_name}",
                 "url": res.source_url,
                 "ok": str(ok),
-                "started_utc": started_utc,
-                "ended_utc": ended_utc,
-                "started_local": started_local,
-                "ended_local": ended_local,
+                "started": started_local,
+                "ended": ended_local,
                 "duration_s": f"{duration_s:.3f}",
                 "driver_url": driver_url or "",
                 "tags": tags[:12],
@@ -317,17 +315,15 @@ async def run_site_worker(
                 out_path = vault_paths["model"] / fname
                 fm = {
                     "type": ["model_output"],
-                    "created": res.created_utc,
+                    "created": started_local,
                     "author": res.site_id,
                     "run_id": res.run_id,
                     "topic": res.topic,
                     "stream": f"{res.stream_id} | {res.stream_name}",
                     "url": res.source_url,
                     "ok": str(ok),
-                    "started_utc": started_utc,
-                    "ended_utc": ended_utc,
-                    "started_local": started_local,
-                    "ended_local": ended_local,
+                    "started": started_local,
+                    "ended": ended_local,
                     "duration_s": f"{duration_s:.3f}",
                     "tags": tags[:12],
                 }
@@ -422,15 +418,13 @@ async def run_synthesis_and_final(
     synth_path = vault_paths["synth"] / f"synthesis__{arbitrator_site}.md"
     fm_s = {
         "type": ["synthesis"],
-        "created": ended_utc,
+        "created": started_local,
         "author": arbitrator_site,
         "run_id": run_id,
         "topic": brief.topic,
         "url": url,
-        "started_utc": started_utc,
-        "ended_utc": ended_utc,
-        "started_local": started_local,
-        "ended_local": ended_local,
+        "started": started_local,
+        "ended": ended_local,
         "duration_s": f"{dur:.3f}",
         "tags": tags[:12],
     }
@@ -439,15 +433,13 @@ async def run_synthesis_and_final(
     final_path = vault_paths["final"] / f"final__{arbitrator_site}.md"
     fm_f = {
         "type": ["final_decision"],
-        "created": ended_utc,
+        "created": started_local,
         "author": arbitrator_site,
         "run_id": run_id,
         "topic": brief.topic,
         "url": url,
-        "started_utc": started_utc,
-        "ended_utc": ended_utc,
-        "started_local": started_local,
-        "ended_local": ended_local,
+        "started": started_local,
+        "ended": ended_local,
         "duration_s": f"{dur:.3f}",
         "tags": tags[:12],
     }
@@ -464,7 +456,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
     driver_url = (str(brief.output.get("driver_url", "")).strip() or None) or (
         (os.environ.get("RPA_DRIVER_URL") or "").strip() or None
     )
-    task_timeout_s = int(brief.output.get("task_timeout_s", 240))
+    task_timeout_s = int(brief.output.get("task_timeout_s", 480))
 
     vault_paths = make_run_paths(vault_path, root_dir, run_id)
     for p in vault_paths.values():

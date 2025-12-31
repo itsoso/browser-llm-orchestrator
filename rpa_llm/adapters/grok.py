@@ -267,7 +267,7 @@ class GrokAdapter(SiteAdapter):
         await self.try_click(self.NEW_CHAT, timeout_ms=1500)
         await asyncio.sleep(0.8)
 
-    async def ask(self, prompt: str, timeout_s: int = 240) -> Tuple[str, str]:
+    async def ask(self, prompt: str, timeout_s: int = 480) -> Tuple[str, str]:
         self._log("ask: start")
         await self.ensure_ready()
         await self.new_chat()

@@ -36,7 +36,7 @@ class DriverServer:
     一个极简 HTTP server：
     - GET  /health
     - GET  /status
-    - POST /run_task  {"site_id": "...", "prompt": "...", "timeout_s": 240}
+    - POST /run_task  {"site_id": "...", "prompt": "...", "timeout_s": 480}
     每个 site_id 常驻一个 adapter（Playwright persistent context），并用 lock 保证站点内串行。
     """
 
@@ -197,7 +197,7 @@ class DriverServer:
 
                 site_id = payload.get("site_id")
                 prompt = payload.get("prompt")
-                timeout_s = int(payload.get("timeout_s", 240))
+                timeout_s = int(payload.get("timeout_s", 480))
                 if not site_id or not prompt:
                     await self._write_json(writer, 400, {"ok": False, "error": "missing site_id or prompt"})
                     return
