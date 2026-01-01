@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Author: xiaofan with Codex Cusor
+Created: 2025-12-29 20:27:11 +0800
+Modified: 2025-12-30 18:37:59 +0800
+"""
 from __future__ import annotations
 
 import asyncio
@@ -284,6 +290,9 @@ class GeminiAdapter(SiteAdapter):
         return ""
 
     async def ask(self, prompt: str, timeout_s: int = 180) -> Tuple[str, str]:
+        # 0. 清理 prompt 中的换行符（避免输入时触发 Enter）
+        prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"ask: {msg}"))
+        
         await self.ensure_ready()
         await self.new_chat()
 
@@ -300,25 +309,31 @@ class GeminiAdapter(SiteAdapter):
         # --- 2. 聚焦 (强制点击) ---
         try:
             # [修正] timeout 是参数，不是方法
-            await tb.click(timeout=5000)
+            await tb.wait_for(state="visible", timeout=10000)  # 先等待元素可见
+            await tb.click(timeout=10000)  # 增加到 10 秒
             self._log("ask: clicked contenteditable (normal)")
         except Exception:
             self._log("ask: click failed, trying force click...")
             try:
-                await tb.click(force=True, timeout=2000)
+                await tb.wait_for(state="attached", timeout=10000)  # 等待元素附加
+                await tb.click(force=True, timeout=10000)  # 增加到 10 秒
                 self._log("ask: clicked contenteditable (force)")
             except Exception:
                 # 如果强制点击也失败，尝试直接聚焦
                 self._log("ask: click failed, trying focus directly")
-                await tb.focus()
+                try:
+                    await tb.wait_for(state="attached", timeout=10000)
+                    await tb.focus(timeout=10000)
+                except Exception:
+                    pass  # 聚焦失败也不致命
 
         # --- 3. 清空 (使用 JS，最稳) ---
         try:
             # 确保元素可见和可交互，然后执行 evaluate（带超时）
-            await tb.wait_for(state="visible", timeout=5000)
+            await tb.wait_for(state="visible", timeout=15000)  # 增加到 15 秒
             await asyncio.wait_for(
                 tb.evaluate("el => el.innerText = ''"),
-                timeout=5.0
+                timeout=15.0  # 增加到 15 秒
             )
             await asyncio.sleep(0.2)
             self._log("ask: cleared contenteditable")
@@ -327,70 +342,192 @@ class GeminiAdapter(SiteAdapter):
             # 清空失败不致命，继续尝试输入
         
         # --- 4. 输入内容 ---
-        self._log(f"ask: typing {len(prompt)} chars...")
+        prompt_len = len(prompt)
+        self._log(f"ask: inputting {prompt_len} chars...")
         
-        try:
-            # [修正] 移除 .set_timeout()，改用 timeout 参数
-            # 计算动态超时：每字符 10ms + 30秒基数
-            type_timeout = max(30000, len(prompt) * 10)
-            
-            # 使用 type 模拟键盘输入（delay=0 更快）
-            await tb.type(prompt, delay=0, timeout=type_timeout)
-            self._log(f"ask: typed prompt (len={len(prompt)}, timeout={type_timeout/1000:.1f}s)")
-            
-        except Exception as e:
-            self._log(f"ask: type failed ({e}), trying JS inject...")
-            # Fallback: JS 注入
+        # 策略：
+        # 1. 对于超长 prompt (>3000 字符)，直接使用 JS 注入（更快更稳）
+        # 2. 对于中等长度，使用 type() 但增加超时时间
+        # 注意：prompt 已经在方法开始时清理了换行符，所以这里不需要再检查换行符
+        use_js_inject = prompt_len > 3000
+        
+        if use_js_inject:
+            self._log(f"ask: prompt too long ({prompt_len} chars), using JS injection for speed...")
             try:
+                # 最终验证：确保 prompt 中没有任何换行符（JS 注入也需要清理）
+                prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"ask: {msg}"))
+                prompt_len = len(prompt)
+                
                 # 确保元素可见和可交互
-                await tb.wait_for(state="visible", timeout=5000)
+                await tb.wait_for(state="visible", timeout=15000)
                 import json
                 js_code = f"el => el.innerText = {json.dumps(prompt)}"
                 await asyncio.wait_for(
                     tb.evaluate(js_code),
-                    timeout=5.0
+                    timeout=20.0  # 增加到 20 秒
                 )
                 # 必须触发 input 事件，否则发送按钮可能不亮
                 await asyncio.wait_for(
                     tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
-                    timeout=3.0
+                    timeout=10.0
                 )
                 self._log("ask: injected via JS + triggered input event")
+                
+                # JS 注入后也检查是否已经发送
+                await asyncio.sleep(0.2)
+                try:
+                    textbox_after_js = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                    if not textbox_after_js.strip() or len(textbox_after_js.strip()) < prompt_len * 0.1:
+                        self._log(f"ask: warning - prompt may have been sent during JS injection (textbox empty or nearly empty)")
+                except Exception:
+                    pass
             except Exception as js_err:
-                self._log(f"ask: JS injection also failed: {js_err}")
-                raise  # 如果 JS 注入也失败，抛出异常
+                self._log(f"ask: JS injection failed: {js_err}, trying type() as fallback...")
+                use_js_inject = False  # 如果 JS 注入失败，回退到 type()
+        
+        if not use_js_inject:
+            # 使用 type 模拟键盘输入（delay=0 更快）
+            try:
+                # 计算动态超时：每字符 50ms + 60秒基数（与 ChatGPT 保持一致）
+                type_timeout = max(60000, prompt_len * 50)
+                
+                await tb.type(prompt, delay=0, timeout=type_timeout)
+                self._log(f"ask: typed prompt (len={prompt_len}, timeout={type_timeout/1000:.1f}s)")
+                
+            except Exception as e:
+                self._log(f"ask: type failed ({e}), trying JS inject as fallback...")
+                # Fallback: JS 注入
+                try:
+                    # 确保元素可见和可交互
+                    await tb.wait_for(state="visible", timeout=15000)
+                    import json
+                    js_code = f"el => el.innerText = {json.dumps(prompt)}"
+                    await asyncio.wait_for(
+                        tb.evaluate(js_code),
+                        timeout=20.0  # 增加到 20 秒
+                    )
+                    # 必须触发 input 事件，否则发送按钮可能不亮
+                    await asyncio.wait_for(
+                        tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
+                        timeout=10.0
+                    )
+                    self._log("ask: injected via JS + triggered input event (fallback)")
+                except Exception as js_err:
+                    self._log(f"ask: JS injection also failed: {js_err}")
+                    raise  # 如果 JS 注入也失败，抛出异常
         
         await asyncio.sleep(0.5)
         
         # --- 5. 发送 (点击按钮 或 回车) ---
+        # 记录发送前的输入框内容，用于检测是否已经发送
+        try:
+            textbox_content_before_send = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+            textbox_len_before_send = len(textbox_content_before_send.strip())
+            self._log(f"send: textbox content before send (len={textbox_len_before_send})")
+        except Exception:
+            textbox_content_before_send = ""
+            textbox_len_before_send = 0
+        
         sent = False
         for btn_sel in self.SEND_BTN:
             try:
                 btn = self.page.locator(btn_sel).first
-                if await btn.is_visible(timeout=1000):
-                    await btn.click(timeout=3000)
+                if await btn.is_visible(timeout=5000):  # 增加到 5 秒
+                    await btn.click(timeout=10000)  # 增加到 10 秒
                     sent = True
                     self._log(f"ask: clicked send button {btn_sel}")
-                    break
-            except Exception:
+                    # 点击后等待一下，检查是否真的发送了
+                    # 优化：使用多种方式检测，避免误报
+                    await asyncio.sleep(0.5)
+                    sent_confirmed = False
+                    
+                    # 方法1: 检查输入框内容是否清空（快速但可能不准确）
+                    try:
+                        textbox_content_after = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                        textbox_len_after = len(textbox_content_after.strip())
+                        if textbox_len_after < textbox_len_before_send * 0.3:  # 降低阈值到30%，更宽松
+                            self._log(f"send: confirmed sent via textbox clear (len: {textbox_len_before_send} -> {textbox_len_after})")
+                            sent_confirmed = True
+                        elif textbox_len_after < textbox_len_before_send * 0.7:
+                            # 内容部分减少，可能是发送了但页面还在处理
+                            self._log(f"send: textbox partially cleared (len: {textbox_len_before_send} -> {textbox_len_after}), likely sent")
+                            sent_confirmed = True
+                        else:
+                            self._log(f"send: textbox still has content after button click (len={textbox_len_after}), checking response...")
+                    except Exception:
+                        # 如果无法读取输入框，假设已发送（可能是页面正在刷新）
+                        self._log("send: cannot read textbox after click, assuming sent")
+                        sent_confirmed = True
+                    
+                    # 方法2: 等待一小段时间，检查是否有响应开始（更可靠）
+                    if not sent_confirmed:
+                        try:
+                            # 优化：增加等待时间，从1秒增加到2秒，给响应更多时间开始
+                            await asyncio.sleep(2.0)
+                            # 优化：记录发送前的 assistant 文本，用于比较
+                            assistant_text_before_send = await self._last_assistant_text()
+                            # 等待后再检查
+                            await asyncio.sleep(0.5)
+                            assistant_text_after = await self._last_assistant_text()
+                            # 优化：检查文本是否变化，而不仅仅是长度
+                            if assistant_text_after and assistant_text_after != assistant_text_before_send:
+                                # 文本发生变化，说明有新响应
+                                self._log(f"send: confirmed sent via response detection (text changed, len={len(assistant_text_after)})")
+                                sent_confirmed = True
+                            elif assistant_text_after and len(assistant_text_after.strip()) > 20:  # 如果有足够长的响应，也认为已发送
+                                self._log(f"send: confirmed sent via response detection (response_len={len(assistant_text_after)})")
+                                sent_confirmed = True
+                        except Exception:
+                            pass
+                    
+                    if sent_confirmed:
+                        break
+                    # 即使未确认，也继续（可能已经发送但检测不到）
+            except Exception as e:
+                self._log(f"send: button click failed for {btn_sel}: {e}")
                 continue
         
+        # 如果按钮点击没有成功，或者不确定是否发送了，检查输入框状态
         if not sent:
-            self._log("ask: send button not found, pressing Enter")
+            # 再次检查输入框内容，确认是否已经发送
+            try:
+                textbox_content_check = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                textbox_len_check = len(textbox_content_check.strip())
+                if textbox_len_check < textbox_len_before_send * 0.5:  # 如果内容明显减少，说明已经发送了
+                    self._log(f"send: detected already sent (textbox len: {textbox_len_before_send} -> {textbox_len_check}), skipping Enter")
+                    sent = True
+            except Exception:
+                pass
+        
+        if not sent:
+            self._log("ask: send button not found or not confirmed, pressing Enter")
             try:
                 # 确保元素可见和可交互，然后按 Enter（带超时）
-                await tb.wait_for(state="visible", timeout=5000)
-                await tb.press("Enter", timeout=5000)
+                await tb.wait_for(state="visible", timeout=15000)  # 增加到 15 秒
+                await tb.press("Enter", timeout=10000)  # 增加到 10 秒
                 self._log("ask: Enter pressed")
+                # Enter 后也检查一下是否发送了
+                await asyncio.sleep(0.5)
+                try:
+                    textbox_content_after_enter = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                    textbox_len_after_enter = len(textbox_content_after_enter.strip())
+                    if textbox_len_after_enter < textbox_len_before_send * 0.5:
+                        self._log(f"send: confirmed sent via Enter (textbox len: {textbox_len_before_send} -> {textbox_len_after_enter})")
+                        sent = True
+                except Exception:
+                    pass
             except Exception as e:
                 self._log(f"ask: Enter press failed: {e}, trying Control+Enter...")
                 try:
                     # 尝试 Control+Enter 作为备选
-                    await tb.press("Control+Enter", timeout=5000)
+                    await tb.press("Control+Enter", timeout=10000)  # 增加到 10 秒
                     self._log("ask: Control+Enter pressed")
+                    sent = True
                 except Exception as e2:
                     self._log(f"ask: Control+Enter also failed: {e2}")
-                    raise RuntimeError(f"ask: both Enter and Control+Enter failed. Enter_err={e}, CtrlEnter_err={e2}")
+                    # 即使都失败了，也不抛出异常，因为可能已经发送了
+                    if not sent:
+                        raise RuntimeError(f"ask: both Enter and Control+Enter failed. Enter_err={e}, CtrlEnter_err={e2}")
             
         # --- 6. 等待回复 (流式检测) ---
         self._log("ask: waiting for response...")

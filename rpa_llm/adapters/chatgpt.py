@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Author: xiaofan with Codex Cusor
+Created: 2025-12-29 20:27:11 +0800
+Modified: 2025-12-31 19:09:41 +0800
+"""
 # rpa_llm/adapters/chatgpt.py
 from __future__ import annotations
 
@@ -7,7 +13,7 @@ import re
 import time
 from typing import Optional, Tuple
 
-from playwright.async_api import Frame, Locator
+from playwright.async_api import Frame, Locator, Error as PlaywrightError
 
 from ..utils import beijing_now_iso
 from .base import SiteAdapter
@@ -172,7 +178,7 @@ class ChatGPTAdapter(SiteAdapter):
         
         # 3. 如果主 Frame 都没找到，再遍历所有 frame（兜底逻辑）
         ph = re.compile(r"(询问|Message|Ask|anything|输入)", re.I)
-        
+
         for frame in self._frames_in_priority():
             # 跳过 main_frame（已经检查过了）
             if frame == mf:
@@ -378,9 +384,21 @@ class ChatGPTAdapter(SiteAdapter):
         return 0
 
     async def _user_count(self) -> int:
+        """
+        获取用户消息数量，带超时保护。
+        如果所有选择器都失败，返回 0。
+        """
         for sel in self.USER_MSG:
             try:
-                return await self.page.locator(sel).count()
+                # 添加超时保护，避免长时间等待
+                # 优化：增加到8秒，给页面更多加载时间
+                return await asyncio.wait_for(
+                    self.page.locator(sel).count(),
+                    timeout=8.0  # 8秒超时，给页面更多加载时间
+                )
+            except asyncio.TimeoutError:
+                # 超时不致命，尝试下一个选择器
+                continue
             except Exception:
                 continue
         return 0
@@ -424,10 +442,14 @@ class ChatGPTAdapter(SiteAdapter):
     async def _send_prompt(self, prompt: str) -> None:
         """
         修复版发送逻辑：
-        1. 使用 JS 强制清空 (解决 Node is not input 报错)
-        2. 智能 fallback 输入 (type -> JS injection)
-        3. 组合键发送优先 (解决按钮点击失败)
+        1. 清理 prompt 中的换行符（避免 type() 将 \n 解释为 Enter）
+        2. 使用 JS 强制清空 (解决 Node is not input 报错)
+        3. 智能 fallback 输入 (type -> JS injection)
+        4. 组合键发送优先 (解决按钮点击失败)
         """
+        # 0. 清理 prompt 中的换行符（避免输入时触发 Enter）
+        prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"send: {msg}"))
+        
         # 1. 寻找输入框（带重试机制）
         found = None
         max_retries = 5
@@ -445,16 +467,20 @@ class ChatGPTAdapter(SiteAdapter):
                 # 最后一次尝试失败，保存截图并触发 manual checkpoint
                 await self.save_artifacts("send_no_textbox")
                 await self.manual_checkpoint(
-                    "发送前未找到输入框，请手动点一下输入框后继续。",
-                    ready_check=self._ready_check_textbox,
-                    max_wait_s=60,
-                )
-                found = await self._find_textbox_any_frame()
-                if not found:
+                "发送前未找到输入框，请手动点一下输入框后继续。",
+                ready_check=self._ready_check_textbox,
+                max_wait_s=60,
+            )
+            found = await self._find_textbox_any_frame()
+            if not found:
                     raise RuntimeError("send: textbox not found")
 
         tb, frame, how = found
         self._log(f"send: textbox via {how} frame={frame.url}")
+
+        # 记录发送前的用户消息数量，用于检测是否已经发送
+        user_count_before_send = await self._user_count()
+        self._log(f"send: user_count(before)={user_count_before_send}")
 
         # 2. 确保焦点（点击失败不致命，可能是被遮挡，JS 输入依然可能成功）
         try:
@@ -464,6 +490,7 @@ class ChatGPTAdapter(SiteAdapter):
 
         # 3. 循环尝试写入 (最多 2 次)
         prompt_sent = False
+        already_sent_during_input = False  # 标记是否在输入过程中已经发送
         for attempt in range(2):
             try:
                 if attempt > 0:
@@ -512,35 +539,139 @@ class ChatGPTAdapter(SiteAdapter):
                     
                     await asyncio.sleep(0.5)  # 等待 React 状态完全更新
                 except Exception as e:
-                    self._log(f"send: JS clear failed: {e}")
+                    # 记录详细错误信息，包括异常类型、消息和堆栈信息
+                    import traceback
+                    error_msg = f"{type(e).__name__}: {str(e)}" if str(e) else f"{type(e).__name__} (no message)"
+                    error_trace = traceback.format_exc()
+                    self._log(f"send: JS clear failed: {error_msg}")
+                    self._log(f"send: JS clear traceback: {error_trace[:200]}...")  # 只记录前200字符
                     # 清空失败不致命，继续尝试输入（但可能会影响结果）
 
                 # --- 输入内容 ---
-                self._log(f"send: writing prompt ({len(prompt)} chars)...")
+                prompt_len = len(prompt)
+                self._log(f"send: writing prompt ({prompt_len} chars)...")
                 
-                # 策略 A: 优先尝试 type (模拟键盘，最稳，触发 React 事件)
-                # 之前的 fill 容易报错 "Node is not input"，改用 type
+                # 策略：
+                # 1. 对于超长 prompt (>3000 字符)，直接使用 JS 注入（更快更稳）
+                # 2. 对于中等长度，使用 type() 但增加超时时间
+                # 注意：prompt 已经在方法开始时清理了换行符，所以这里不需要再检查换行符
+                use_js_inject = prompt_len > 3000
                 type_success = False
-                try:
-                    # 确保元素可见和可交互，然后执行 type
-                    await tb.wait_for(state="attached", timeout=10000)
-                    # 确保元素有焦点
+                
+                if use_js_inject:
+                    self._log(f"send: prompt too long ({prompt_len} chars), using JS injection for speed...")
                     try:
-                        await tb.focus(timeout=3000)
-                    except Exception:
-                        pass  # focus 失败不致命
-                    
-                    # 设置超时（毫秒），根据长度动态调整
-                    # 每字符至少 50ms，最小 60 秒（长 prompt 需要更多时间）
-                    timeout_ms = max(60000, len(prompt) * 50)
-                    await tb.type(prompt, delay=0, timeout=timeout_ms)
-                    self._log(f"send: typed prompt (timeout={timeout_ms/1000:.1f}s)")
-                    type_success = True
-                except Exception as e:
-                    error_str = str(e)
-                    # 检查是否是超时错误
-                    if "Timeout" in error_str or "timeout" in error_str.lower():
-                        self._log(f"send: type() timeout ({e}), checking partial input...")
+                        # 最终验证：确保 prompt 中没有任何换行符（JS 注入也需要清理）
+                        prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"send: {msg}"))
+                        prompt_len = len(prompt)
+                        
+                        await tb.wait_for(state="attached", timeout=10000)
+                        import json
+                        js_code = f"el => el.innerText = {json.dumps(prompt)}"
+                        await asyncio.wait_for(
+                            tb.evaluate(js_code),
+                            timeout=20.0
+                        )
+                        await asyncio.wait_for(
+                            tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
+                            timeout=10.0
+                        )
+                        self._log("send: injected via JS + triggered input event")
+                        
+                        # JS 注入后也检查是否已经发送
+                        await asyncio.sleep(0.2)
+                        try:
+                            user_count_after_js = await self._user_count()
+                            if user_count_after_js > user_count_before_send:
+                                self._log(f"send: warning - prompt may have been sent during JS injection (user_count={user_count_after_js})")
+                                # 检查输入框是否已清空
+                                try:
+                                    textbox_after_js = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                                    if not textbox_after_js.strip() or len(textbox_after_js.strip()) < prompt_len * 0.1:
+                                        self._log(f"send: confirmed - prompt was sent during JS injection")
+                                        type_success = True
+                                        prompt_sent = True
+                                        already_sent_during_input = True
+                                        break
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        type_success = True
+                    except Exception as js_err:
+                        self._log(f"send: JS injection failed: {js_err}, trying type() as fallback...")
+                        use_js_inject = False  # 如果 JS 注入失败，回退到 type()
+                
+                if not use_js_inject:
+                    # 策略 A: 优先尝试 type (模拟键盘，最稳，触发 React 事件)
+                    # 之前的 fill 容易报错 "Node is not input"，改用 type
+                    try:
+                        # 确保元素可见和可交互，然后执行 type
+                        await tb.wait_for(state="attached", timeout=10000)
+                        # 确保元素有焦点
+                        try:
+                            await tb.focus(timeout=3000)
+                        except Exception:
+                            pass  # focus 失败不致命
+                        
+                        # 最终验证：确保 prompt 中没有任何换行符（双重保险）
+                        prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"send: {msg}"))
+                        prompt_len = len(prompt)
+                        
+                        # 设置超时（毫秒），根据长度动态调整
+                        # 每字符至少 50ms，最小 60 秒（长 prompt 需要更多时间）
+                        timeout_ms = max(60000, prompt_len * 50)
+                        
+                        # 在 type() 之前再次检查用户消息数量（防止在等待期间已发送）
+                        try:
+                            user_count_before_type = await self._user_count()
+                            if user_count_before_type > user_count_before_send:
+                                self._log(f"send: already sent before type() (user_count={user_count_before_type}), skipping type()")
+                                type_success = True
+                                prompt_sent = True
+                                already_sent_during_input = True
+                                break
+                        except Exception:
+                            pass
+                        
+                        try:
+                            await tb.type(prompt, delay=0, timeout=timeout_ms)
+                            self._log(f"send: typed prompt (timeout={timeout_ms/1000:.1f}s)")
+                        except PlaywrightError as pe:
+                            # 处理 Playwright 错误（包括 TargetClosedError）
+                            if "TargetClosed" in str(pe) or "Target page" in str(pe):
+                                self._log(f"send: browser/page closed during type(), raising error")
+                                raise RuntimeError(f"Browser/page closed during input: {pe}") from pe
+                            raise  # 其他 Playwright 错误继续抛出
+                        
+                        # type() 完成后立即检查是否已经发送（可能因为其他原因导致提前发送）
+                        await asyncio.sleep(0.2)  # 减少等待时间，更快检测
+                        try:
+                            user_count_after_type = await self._user_count()
+                            if user_count_after_type > user_count_before_send:
+                                self._log(f"send: warning - prompt may have been sent during type() (user_count={user_count_after_type} > {user_count_before_send}), checking input box...")
+                                # 检查输入框是否已清空（如果已清空，说明已发送）
+                                try:
+                                    textbox_after = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                                    if not textbox_after.strip() or len(textbox_after.strip()) < prompt_len * 0.1:
+                                        self._log(f"send: confirmed - prompt was sent during type() (textbox empty or nearly empty)")
+                                        # 如果已发送，标记为成功，但需要跳过后续的发送操作
+                                        type_success = True
+                                        prompt_sent = True
+                                        already_sent_during_input = True  # 标记已在输入过程中发送
+                                        break  # 跳出输入循环，跳过验证，直接到发送检查
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        
+                        type_success = True
+                    except Exception as e:
+                        error_str = str(e)
+                        # 检查是否是超时错误
+                        if "Timeout" in error_str or "timeout" in error_str.lower():
+                            self._log(f"send: type() timeout ({e}), checking partial input...")
                         # 超时可能已经输入了一部分，先检查当前内容
                         try:
                             # 等待一下，让 React 状态更新
@@ -596,30 +727,30 @@ class ChatGPTAdapter(SiteAdapter):
                                 await tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; el.textContent = ''; }")
                             except Exception:
                                 pass
-                    
-                    if not type_success:
-                        self._log(f"send: type() failed ({e}), trying JS injection...")
-                        # 策略 B: JS 注入 (最快，但可能不触发事件，需要后续处理)
-                        try:
-                            # 确保元素可见和可交互
-                            await tb.wait_for(state="visible", timeout=5000)
-                            # JSON.stringify 处理转义字符
-                            import json
-                            js_code = f"el => el.innerText = {json.dumps(prompt)}"
-                            await asyncio.wait_for(
-                                tb.evaluate(js_code),
-                                timeout=5.0
-                            )
-                            # 注入后必须触发 input 事件，否则发送按钮可能不亮
-                            await asyncio.wait_for(
-                                tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
-                                timeout=3.0
-                            )
-                            self._log("send: injected via JS + triggered input event")
-                            type_success = True
-                        except Exception as js_err:
-                            self._log(f"send: JS injection also failed: {js_err}")
-                            raise  # 如果 JS 注入也失败，抛出异常触发重试
+
+                        if not type_success:
+                            self._log(f"send: type() failed ({e}), trying JS injection...")
+                            # 策略 B: JS 注入 (最快，但可能不触发事件，需要后续处理)
+                            try:
+                                # 确保元素可见和可交互
+                                await tb.wait_for(state="visible", timeout=5000)
+                                # JSON.stringify 处理转义字符
+                                import json
+                                js_code = f"el => el.innerText = {json.dumps(prompt)}"
+                                await asyncio.wait_for(
+                                    tb.evaluate(js_code),
+                                    timeout=20.0  # 增加到 20 秒
+                                )
+                                # 注入后必须触发 input 事件，否则发送按钮可能不亮
+                                await asyncio.wait_for(
+                                    tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
+                                    timeout=10.0  # 增加到 10 秒
+                                )
+                                self._log("send: injected via JS + triggered input event")
+                                type_success = True
+                            except Exception as js_err:
+                                self._log(f"send: JS injection also failed: {js_err}")
+                                raise  # 如果 JS 注入也失败，抛出异常触发重试
 
                 # 等待输入完成和 React 状态更新
                 await asyncio.sleep(1.0)  # 增加等待时间，确保输入完全完成
@@ -650,15 +781,27 @@ class ChatGPTAdapter(SiteAdapter):
                 expected_len = len(prompt_clean)
                 len_ratio = actual_len / expected_len if expected_len > 0 else 0
                 
-                # 检查长度是否足够（至少 95%，允许少量格式差异）
-                if len_ratio < 0.95:
+                # 检查长度是否足够（至少 80% 即可接受，避免过度重试导致重复发送）
+                # 如果内容已经达到 80%，即使不完全匹配，也接受（避免过度重试）
+                if len_ratio < 0.80:
                     self._log(f"send: content mismatch - expected={expected_len}, actual={actual_len}, ratio={len_ratio:.2%}")
                     # 显示前 100 个字符用于调试
                     preview = actual_clean[:100] if actual_clean else "(empty)"
                     self._log(f"send: actual preview: {preview}...")
                     
+                    # 在重试之前，检查是否已经有新的用户消息（如果有，说明已经发送了，不应该重试）
+                    try:
+                        user_count_now = await self._user_count()
+                        if user_count_now > user_count_before_send:
+                            self._log(f"send: warning - new user message detected (count={user_count_now} > {user_count_before_send}), content may have been sent already, accepting current input to avoid duplicate")
+                            # 如果已经有新的用户消息，说明内容已经被发送了，不应该重试
+                            prompt_sent = True
+                            break
+                    except Exception:
+                        pass  # 检查失败不影响重试逻辑
+                    
                     # 如果实际内容明显少于预期，可能是读取时机问题，再等待并重新读取
-                    if len_ratio < 0.95:
+                    if len_ratio < 0.80:
                         # 根据不完整程度决定等待时间
                         if len_ratio < 0.5:
                             wait_time = 2.0  # 内容很少，等待更长时间
@@ -677,8 +820,8 @@ class ChatGPTAdapter(SiteAdapter):
                             actual_retry_len = len(actual_retry_clean)
                             retry_ratio = actual_retry_len / expected_len if expected_len > 0 else 0
                             
-                            if retry_ratio >= 0.95:
-                                # 重新读取后内容完整，使用新读取的内容
+                            if retry_ratio >= 0.80:
+                                # 重新读取后内容达到 80%，使用新读取的内容
                                 actual_clean = actual_retry_clean
                                 actual_len = actual_retry_len
                                 len_ratio = retry_ratio
@@ -691,8 +834,8 @@ class ChatGPTAdapter(SiteAdapter):
                             self._log(f"send: re-read failed: {re_read_err}")
                             # 读取失败，必须重试
                     
-                    # 如果重新读取后仍然不完整，触发重试
-                    if len_ratio < 0.95:
+                    # 如果重新读取后仍然不完整（<80%），触发重试
+                    if len_ratio < 0.80:
                         self._log(f"send: content still incomplete after re-read (ratio={len_ratio:.2%}), retrying...")
                         # 重试前确保彻底清空（防止两段内容叠加）
                         try:
@@ -712,20 +855,29 @@ class ChatGPTAdapter(SiteAdapter):
                         continue  # 触发下一次重试
                 
                 # 额外检查：验证开头和结尾是否匹配（防止中间截断）
-                if actual_clean and prompt_clean:
+                # 但如果内容已经达到 80%，即使开头/结尾不完全匹配，也接受（避免过度重试）
+                if actual_clean and prompt_clean and len_ratio >= 0.80:
                     # 检查开头（前 50 个字符）
                     actual_start = actual_clean[:50].strip()
                     prompt_start = prompt_clean[:50].strip()
                     if actual_start != prompt_start:
                         self._log(f"send: content start mismatch - expected starts with '{prompt_start[:30]}...', got '{actual_start[:30]}...'")
-                        continue
+                        # 如果内容已经达到 80%，即使开头不完全匹配，也接受（避免过度重试）
+                        if len_ratio >= 0.80:
+                            self._log(f"send: accepting despite start mismatch (ratio={len_ratio:.2%} >= 80%)")
+                        else:
+                            continue
                     
                     # 检查结尾（后 50 个字符）
                     actual_end = actual_clean[-50:].strip()
                     prompt_end = prompt_clean[-50:].strip()
                     if actual_end != prompt_end:
                         self._log(f"send: content end mismatch - expected ends with '...{prompt_end[-30:]}', got '...{actual_end[-30:]}'")
-                        continue
+                        # 如果内容已经达到 80%，即使结尾不完全匹配，也接受（避免过度重试）
+                        if len_ratio >= 0.80:
+                            self._log(f"send: accepting despite end mismatch (ratio={len_ratio:.2%} >= 80%)")
+                        else:
+                            continue
                 
                 self._log(f"send: content verified OK (len={actual_len}, ratio={len_ratio:.2%})")
                 prompt_sent = True
@@ -739,25 +891,75 @@ class ChatGPTAdapter(SiteAdapter):
             raise RuntimeError("send: failed to enter prompt after retries")
 
         # 4. --- [关键修复] 发送逻辑升级 ---
+        # 如果已经在输入过程中发送了，直接返回，不再触发发送
+        if already_sent_during_input:
+            self._log("send: prompt was already sent during input, skipping send trigger")
+            return
+        
+        # 在发送前，再次检查是否已经发送（防止重复发送）
+        try:
+            user_count_before_trigger = await self._user_count()
+            if user_count_before_trigger > user_count_before_send:
+                self._log(f"send: already sent detected (user_count={user_count_before_trigger} > {user_count_before_send}), skipping send trigger")
+                return  # 已经发送了，不需要再触发
+        except Exception:
+            pass  # 检查失败不影响发送逻辑
+        
         self._log("send: triggering send...")
 
         # 步骤 1: 尝试 Enter (最快)
         try:
             await tb.press("Enter", timeout=3000)
             self._log("send: Enter pressed")
+            # Enter 后立即检查是否发送成功
+            await asyncio.sleep(0.3)
+            try:
+                user_count_after_enter = await self._user_count()
+                if user_count_after_enter > user_count_before_send:
+                    self._log(f"send: confirmed sent via Enter (user_count={user_count_after_enter})")
+                    return  # 已发送，不需要继续
+            except Exception:
+                pass
         except Exception:
             pass
-        
+
         # 给一点反应时间，如果 Enter 生效了，页面会刷新，下面的逻辑其实无害
         await asyncio.sleep(0.5)
+
+        # 再次检查是否已经发送（Enter 可能已经生效）
+        try:
+            user_count_check = await self._user_count()
+            if user_count_check > user_count_before_send:
+                self._log(f"send: already sent after Enter (user_count={user_count_check}), skipping further send attempts")
+                return  # 已经发送了，不需要继续
+        except Exception:
+            pass
 
         # 步骤 2: 尝试 Control+Enter (日志证明这是救世主)
         # 很多时候 Enter 只是换行，Ctrl+Enter 才是强制提交
         try:
             self._log("send: trying Control+Enter (reliable fallback)...")
             await tb.press("Control+Enter", timeout=3000)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             self._log("send: Control+Enter pressed")
+            # Control+Enter 后立即检查是否发送成功
+            try:
+                user_count_after_ctrl_enter = await self._user_count()
+                if user_count_after_ctrl_enter > user_count_before_send:
+                    self._log(f"send: confirmed sent via Control+Enter (user_count={user_count_after_ctrl_enter})")
+                    return  # 已发送，不需要继续
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # 再次检查是否已经发送（Control+Enter 可能已经生效）
+        await asyncio.sleep(0.5)
+        try:
+            user_count_check2 = await self._user_count()
+            if user_count_check2 > user_count_before_send:
+                self._log(f"send: already sent after Control+Enter (user_count={user_count_check2}), skipping button click")
+                return  # 已经发送了，不需要继续
         except Exception:
             pass
 
@@ -770,10 +972,19 @@ class ChatGPTAdapter(SiteAdapter):
                     self._log(f"send: clicking send button {send_sel}...")
                     await btn.click(timeout=3000)
                     self._log(f"send: clicked send button {send_sel}")
-                    return
+                    # 按钮点击后也检查是否发送成功
+                    await asyncio.sleep(0.3)
+                    try:
+                        user_count_after_btn = await self._user_count()
+                        if user_count_after_btn > user_count_before_send:
+                            self._log(f"send: confirmed sent via button (user_count={user_count_after_btn})")
+                            return
+                    except Exception:
+                        pass
+                        return
             except Exception:
                 continue
-        
+
         # 如果所有方法都尝试过了，不报错（因为 Enter 或 Control+Enter 可能已经生效）
         self._log("send: all send methods attempted (Enter/Control+Enter/Button)")
 
@@ -788,14 +999,14 @@ class ChatGPTAdapter(SiteAdapter):
             ask_start_time = time.time()
             self._log(f"ask: start (timeout={timeout_s}s)")
             
-            await self.ensure_ready()
-            await self.ensure_variant()
+        await self.ensure_ready()
+        await self.ensure_variant()
 
-            # 是否每次新聊天（默认关闭，提高稳定性与速度）
-            if self._new_chat_enabled():
-                await self.new_chat()
-                # 新聊天后输入框重建，重新确保 ready
-                await self.ensure_ready()
+        # 是否每次新聊天（默认关闭，提高稳定性与速度）
+        if self._new_chat_enabled():
+            await self.new_chat()
+            # 新聊天后输入框重建，重新确保 ready
+            await self.ensure_ready()
 
             n_assist0 = await self._assistant_count()
             user0 = await self._user_count()
@@ -816,25 +1027,40 @@ class ChatGPTAdapter(SiteAdapter):
             self._log("ask: confirming user message appeared...")
             t0 = time.time()
             hb = t0
-            user_wait_timeout = min(45, remaining - 5)  # 最多45秒，但不超过剩余时间
+            user_wait_timeout = min(30, remaining - 5)  # 优化：从45秒减少到30秒
             while time.time() - t0 < user_wait_timeout:
                 elapsed = time.time() - ask_start_time
                 if elapsed >= timeout_s - 5:  # 留5秒缓冲
                     break
+                
+                # 优化：快速路径 - 如果 assistant_count 已经增加，推断 user_count 也应该增加
                 try:
-                    user1 = await asyncio.wait_for(self._user_count(), timeout=2.0)
+                    n_assist_check = await asyncio.wait_for(self._assistant_count(), timeout=2.0)
+                    if n_assist_check > n_assist0:
+                        self._log(f"ask: assistant_count increased ({n_assist_check} > {n_assist0}), assuming user message sent")
+                        break
+                except Exception:
+                    pass  # 检查失败不影响主流程
+                
+                try:
+                    # _user_count() 内部已有 8 秒超时，这里不再额外包装
+                    # 直接调用，如果超时会抛出 TimeoutError
+                    user1 = await self._user_count()
                     if user1 > user0:
                         self._log(f"ask: user_count(after)={user1} (sent OK)")
                         break
                 except asyncio.TimeoutError:
-                    self._log("ask: user_count() timeout, retrying...")
+                    # _user_count() 内部超时，但可能只是某个选择器失败，继续尝试
+                    # 优化：减少日志输出频率，避免日志过多
+                    pass  # 静默重试，减少日志噪音
                 except Exception as e:
                     self._log(f"ask: user_count() error: {e}")
                 
                 if time.time() - hb >= 5:
                     self._log("ask: still waiting user message to appear...")
                     hb = time.time()
-                await asyncio.sleep(0.5)
+                # 优化：减少重试间隔，从0.5秒减少到0.3秒，加快检测速度
+                await asyncio.sleep(0.3)
             else:
                 await self.save_artifacts("send_not_confirmed")
                 await self.manual_checkpoint(
@@ -880,34 +1106,47 @@ class ChatGPTAdapter(SiteAdapter):
                 )
 
             # 等待新消息的文本内容出现（确保不是旧消息）
+            # 优化：如果 assistant_count 已经增加，可以快速跳过这个检查
             self._log("ask: waiting for new message content (different from before)...")
             t2 = time.time()
             hb = t2
             new_message_found = False
             elapsed = time.time() - ask_start_time
             remaining = timeout_s - elapsed
-            content_wait_timeout = min(30, remaining * 0.3)  # 最多30秒或剩余时间的30%
+            # 优化：减少超时时间，从30秒减少到15秒
+            content_wait_timeout = min(15, remaining * 0.2)  # 最多15秒或剩余时间的20%
             
-            while time.time() - t2 < content_wait_timeout:
-                elapsed = time.time() - ask_start_time
-                if elapsed >= timeout_s - 10:  # 留10秒给稳定等待
-                    break
-                try:
-                    current_text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
-                    # 新消息必须：1) 有内容 2) 与发送前的消息不同
-                    if current_text and current_text != last_assist_text_before:
-                        new_message_found = True
-                        self._log(f"ask: new message content detected (len={len(current_text)})")
+            # 优化：快速路径 - 先快速检查一次，如果已经有新内容，直接跳过
+            try:
+                current_text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=1.0)
+                if current_text_quick and current_text_quick != last_assist_text_before:
+                    new_message_found = True
+                    self._log(f"ask: new message content detected quickly (len={len(current_text_quick)})")
+            except Exception:
+                pass  # 快速检查失败，继续正常流程
+            
+            if not new_message_found:
+                while time.time() - t2 < content_wait_timeout:
+                    elapsed = time.time() - ask_start_time
+                    if elapsed >= timeout_s - 10:  # 留10秒给稳定等待
                         break
-                except asyncio.TimeoutError:
-                    pass
-                except Exception as e:
-                    self._log(f"ask: _last_assistant_text() error: {e}")
-                    
-                if time.time() - hb >= 5:
-                    self._log(f"ask: still waiting for new message content... (elapsed={elapsed:.1f}s/{timeout_s}s)")
-                    hb = time.time()
-                await asyncio.sleep(0.6)
+                    try:
+                        current_text = await asyncio.wait_for(self._last_assistant_text(), timeout=1.5)  # 优化：减少超时时间
+                        # 新消息必须：1) 有内容 2) 与发送前的消息不同
+                        if current_text and current_text != last_assist_text_before:
+                            new_message_found = True
+                            self._log(f"ask: new message content detected (len={len(current_text)})")
+                            break
+                    except asyncio.TimeoutError:
+                        pass
+                    except Exception as e:
+                        self._log(f"ask: _last_assistant_text() error: {e}")
+                        
+                    if time.time() - hb >= 5:
+                        self._log(f"ask: still waiting for new message content... (elapsed={elapsed:.1f}s/{timeout_s}s)")
+                        hb = time.time()
+                    # 优化：减少等待间隔，从0.6秒减少到0.4秒
+                    await asyncio.sleep(0.4)
             
             if not new_message_found:
                 self._log("ask: warning: new message content not confirmed, but continuing...")

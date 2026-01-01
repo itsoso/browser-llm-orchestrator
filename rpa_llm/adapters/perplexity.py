@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Author: xiaofan with Codex Cusor
+Created: 2025-12-29 20:27:11 +0800
+Modified: 2025-12-31 19:09:41 +0800
+"""
 # rpa_llm/adapters/perplexity.py
 from __future__ import annotations
 
@@ -206,6 +212,9 @@ class PerplexityAdapter(SiteAdapter):
         await asyncio.sleep(0.8)
 
     async def ask(self, prompt: str, timeout_s: int = 480) -> Tuple[str, str]:
+        # 清理 prompt 中的换行符（避免输入时触发 Enter）
+        prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"ask: {msg}"))
+        
         self._log("ask: start")
         await self.ensure_ready()
         await self.new_chat()
@@ -214,11 +223,22 @@ class PerplexityAdapter(SiteAdapter):
         self._log(f"send: textbox via {how} frame={frame.url}")
 
         # 1) 用 type 触发真实事件（不要只 fill）
+        # 最终验证：确保 prompt 中没有任何换行符（双重保险）
+        prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"ask: {msg}"))
+        
         await tb.click()
         try:
             # 清空再输入，确保事件链完整
             await tb.fill("")
             await tb.type(prompt, delay=5)  # delay 略微像人类输入
+            # type() 完成后立即检查是否已经发送
+            await asyncio.sleep(0.2)
+            try:
+                textbox_after = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                if not textbox_after.strip() or len(textbox_after.strip()) < len(prompt) * 0.1:
+                    self._log(f"ask: warning - prompt may have been sent during type() (textbox empty or nearly empty)")
+            except Exception:
+                pass
         except Exception:
             # contenteditable 退化方案
             await tb.fill(prompt)

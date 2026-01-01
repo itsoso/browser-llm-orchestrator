@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Author: xiaofan with Codex Cusor
+Created: 2025-12-30 18:37:59 +0800
+Modified: 2025-12-30 18:37:59 +0800
+"""
 #!/usr/bin/env python3
 """
 预热脚本：手动登录并保存浏览器状态

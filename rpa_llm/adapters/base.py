@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Author: xiaofan with Codex Cusor
+Created: 2025-12-29 20:27:11 +0800
+Modified: 2025-12-30 17:38:02 +0800
+"""
 # rpa_llm/adapters/base.py
 from __future__ import annotations
 
@@ -347,6 +353,60 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             except Exception as e:
                 last_err = e
         raise RuntimeError(f"[{self.site_id}] No visible element found. {last_err}")
+
+    @staticmethod
+    def clean_newlines(prompt: str, logger=None) -> str:
+        """
+        清理 prompt 中的换行符，避免输入时触发 Enter 导致提前提交。
+        
+        支持清理所有类型的换行符，包括：
+        - 标准换行符：\\n, \\r, \\r\\n
+        - Unicode 换行符：\\u2028 (行分隔符), \\u2029 (段落分隔符), \\u0085 (下一行)
+        
+        Args:
+            prompt: 原始 prompt 字符串
+            logger: 可选的日志记录器（如果有 _log 方法）
+        
+        Returns:
+            清理后的 prompt 字符串（所有换行符替换为空格）
+        
+        Raises:
+            RuntimeError: 如果清理后仍然包含换行符（不应该发生）
+        """
+        import re
+        
+        original_prompt = prompt
+        # 检测所有可能的换行符（包括 Unicode 换行符）
+        newline_chars = ['\n', '\r', '\r\n', '\u2028', '\u2029', '\u0085']
+        newline_count = sum(prompt.count(char) for char in newline_chars)
+        
+        if newline_count == 0:
+            return prompt  # 没有换行符，直接返回
+        
+        # 清理所有类型的换行符（包括 Unicode）
+        prompt = re.sub(r'[\r\n\u2028\u2029\u0085]+', ' ', prompt)
+        # 清理多余的空格（多个连续空格合并为一个）
+        prompt = re.sub(r' +', ' ', prompt)
+        # 去除首尾空格
+        prompt = prompt.strip()
+        
+        # 最终验证：确保没有任何换行符残留
+        if '\n' in prompt or '\r' in prompt:
+            # 强制清理（不应该到达这里，但作为最后的安全网）
+            if logger:
+                logger(f"clean_newlines: warning - newlines still present after cleaning, forcing removal")
+            prompt = prompt.replace('\n', ' ').replace('\r', ' ')
+            prompt = re.sub(r' +', ' ', prompt).strip()
+        
+        # 最终验证：如果仍然包含换行符，抛出异常
+        if '\n' in prompt or '\r' in prompt:
+            raise RuntimeError(f"clean_newlines: failed to clean newlines from prompt (still contains newlines)")
+        
+        # 记录清理信息（如果有 logger）
+        if logger:
+            logger(f"clean_newlines: cleaned {newline_count} newlines from prompt (original_len={len(original_prompt)}, cleaned_len={len(prompt)})")
+        
+        return prompt
 
     async def try_click(self, selectors: List[str], timeout_ms: int = 1500) -> bool:
         for sel in selectors:
