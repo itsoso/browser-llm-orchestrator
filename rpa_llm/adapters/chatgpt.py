@@ -1038,14 +1038,14 @@ class ChatGPTAdapter(SiteAdapter):
             ask_start_time = time.time()
             self._log(f"ask: start (timeout={timeout_s}s)")
             
-        await self.ensure_ready()
-        await self.ensure_variant()
-
-        # 是否每次新聊天（默认关闭，提高稳定性与速度）
-        if self._new_chat_enabled():
-            await self.new_chat()
-            # 新聊天后输入框重建，重新确保 ready
             await self.ensure_ready()
+            await self.ensure_variant()
+
+            # 是否每次新聊天（默认关闭，提高稳定性与速度）
+            if self._new_chat_enabled():
+                await self.new_chat()
+                # 新聊天后输入框重建，重新确保 ready
+                await self.ensure_ready()
 
             n_assist0 = await self._assistant_count()
             user0 = await self._user_count()
