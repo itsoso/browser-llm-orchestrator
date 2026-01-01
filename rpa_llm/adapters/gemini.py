@@ -167,10 +167,15 @@ class GeminiAdapter(SiteAdapter):
         for sel in self.POPUPS:
             try:
                 loc = self.page.locator(sel).first
-                if await loc.is_visible(timeout=500):  # 极短超时，不要死等
-                    self._log(f"popup: dismissing {sel}")
-                    await loc.click()
-                    await asyncio.sleep(0.5)  # 等待动画消失
+                # 修复：is_visible() 不接受 timeout 参数，改为 wait_for(state="visible")
+                if await loc.count() > 0:
+                    try:
+                        await loc.wait_for(state="visible", timeout=500)  # 极短超时，不要死等
+                        self._log(f"popup: dismissing {sel}")
+                        await loc.click()
+                        await asyncio.sleep(0.5)  # 等待动画消失
+                    except Exception:
+                        pass  # 超时或不可见，跳过
             except Exception:
                 pass
 
@@ -187,8 +192,13 @@ class GeminiAdapter(SiteAdapter):
             """尝试单个选择器，返回 (Locator, selector) 或 None"""
             try:
                 loc = self.page.locator(sel).first
-                if await loc.is_visible(timeout=500):
-                    return (loc, sel)
+                # 修复：is_visible() 不接受 timeout 参数，改为 wait_for(state="visible")
+                if await loc.count() > 0:
+                    try:
+                        await loc.wait_for(state="visible", timeout=500)
+                        return (loc, sel)
+                    except Exception:
+                        pass  # 超时或不可见，返回 None
             except Exception:
                 pass
             return None
@@ -293,7 +303,9 @@ class GeminiAdapter(SiteAdapter):
             for sel in self.NEW_CHAT:
                 try:
                     btn = self.page.locator(sel).first
-                    if await btn.is_visible(timeout=1000):
+                    # 修复：is_visible() 不接受 timeout 参数，改为 wait_for(state="visible")
+                    if await btn.count() > 0:
+                        await btn.wait_for(state="visible", timeout=1000)
                         await btn.click()
                         # 优化：添加明确的等待条件，而不是固定 sleep
                         # 等待输入框重新出现或页面 URL 变化
@@ -501,9 +513,9 @@ class GeminiAdapter(SiteAdapter):
         await asyncio.sleep(0.5)
         
         # --- 5. 发送 (点击按钮 或 回车) ---
-        # 记录发送前的输入框内容，用于检测是否已经发送
+        # 记录发送前的输入框内容，用于检测是否已经发送（使用统一的获取方法）
         try:
-            textbox_content_before_send = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+            textbox_content_before_send = await self._tb_get_text(tb)
             textbox_len_before_send = len(textbox_content_before_send.strip())
             self._log(f"send: textbox content before send (len={textbox_len_before_send})")
         except Exception:
@@ -513,10 +525,14 @@ class GeminiAdapter(SiteAdapter):
         sent = False
         t_send = time.time()
         for btn_sel in self.SEND_BTN:
+            # 修复：初始化 sent_confirmed，避免未定义错误
+            sent_confirmed = False
             try:
                 btn = self.page.locator(btn_sel).first
+                # 修复：is_visible() 不接受 timeout 参数，改为 wait_for(state="visible")
                 # 优化：等待按钮可见且稳定（不是加载中状态）
-                if await btn.is_visible(timeout=5000):  # 增加到 5 秒
+                if await btn.count() > 0:
+                    await btn.wait_for(state="visible", timeout=5000)  # 增加到 5 秒
                     # 验证按钮确实是发送按钮，而不是停止按钮
                     try:
                         aria_label = await btn.get_attribute("aria-label") or ""
@@ -558,9 +574,41 @@ class GeminiAdapter(SiteAdapter):
                     except Exception:
                         pass
                     
-                    await btn.click(timeout=10000)  # 增加到 10 秒
-                    sent = True
-                    self._log(f"ask: clicked send button {btn_sel}")
+                    # 优化：尝试正常点击，使用 no_wait_after=True 避免等待潜在导航/网络 idle
+                    try:
+                        await btn.click(timeout=3000, no_wait_after=True)  # 使用 no_wait_after 避免等待
+                        sent = True
+                        self._log(f"ask: clicked send button {btn_sel}")
+                    except Exception as click_err:
+                        # 如果正常点击失败，尝试 force click
+                        self._log(f"ask: normal click failed for {btn_sel}: {click_err}, trying force click...")
+                        try:
+                            await btn.click(force=True, timeout=3000, no_wait_after=True)  # 使用 force + no_wait_after
+                            sent = True
+                            self._log(f"ask: clicked send button {btn_sel} (force)")
+                        except Exception as force_err:
+                            # 如果 force click 也失败，尝试 JS 点击
+                            self._log(f"ask: force click also failed for {btn_sel}: {force_err}, trying JS click...")
+                            try:
+                                await btn.evaluate("el => el.click()")
+                                sent = True
+                                self._log(f"ask: clicked send button {btn_sel} (JS)")
+                            except Exception as js_err:
+                                self._log(f"ask: JS click also failed for {btn_sel}: {js_err}")
+                                # 即使所有点击方法都失败，也检查一下是否已经发送了（可能点击已经生效但 Playwright 没检测到）
+                                await asyncio.sleep(0.5)
+                                try:
+                                    textbox_check = await self._tb_get_text(tb)
+                                    textbox_len_check = len(textbox_check.strip())
+                                    if textbox_len_check < textbox_len_before_send * 0.5:
+                                        self._log(f"ask: detected sent despite click failure (textbox len: {textbox_len_before_send} -> {textbox_len_check})")
+                                        sent = True
+                                        sent_confirmed = True
+                                        break  # 已发送，跳出循环
+                                except Exception:
+                                    pass
+                                # 如果检测不到已发送，继续尝试下一个选择器
+                                continue
                     
                     # 优化：点击后立即检查按钮是否变为 disabled（说明已发送）
                     try:
@@ -576,12 +624,11 @@ class GeminiAdapter(SiteAdapter):
                     # 优化：使用多种方式检测，避免误报
                     if not sent_confirmed:
                         await asyncio.sleep(0.5)
-                    sent_confirmed = sent_confirmed or False
                     
-                    # 方法1: 检查输入框内容是否清空（快速但可能不准确）
+                    # 方法1: 检查输入框内容是否清空（快速但可能不准确，使用统一的获取方法）
                     textbox_len_after = textbox_len_before_send  # 初始化
                     try:
-                        textbox_content_after = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                        textbox_content_after = await self._tb_get_text(tb)
                         textbox_len_after = len(textbox_content_after.strip())
                         if textbox_len_after < textbox_len_before_send * 0.3:  # 降低阈值到30%，更宽松
                             self._log(f"send: confirmed sent via textbox clear (len: {textbox_len_before_send} -> {textbox_len_after})")
@@ -666,9 +713,9 @@ class GeminiAdapter(SiteAdapter):
         
         # 如果按钮点击没有成功，或者不确定是否发送了，检查输入框状态
         if not sent:
-            # 再次检查输入框内容，确认是否已经发送
+            # 再次检查输入框内容，确认是否已经发送（使用统一的获取方法）
             try:
-                textbox_content_check = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                textbox_content_check = await self._tb_get_text(tb)
                 textbox_len_check = len(textbox_content_check.strip())
                 if textbox_len_check < textbox_len_before_send * 0.5:  # 如果内容明显减少，说明已经发送了
                     self._log(f"send: detected already sent (textbox len: {textbox_len_before_send} -> {textbox_len_check}), skipping Enter")
@@ -683,10 +730,10 @@ class GeminiAdapter(SiteAdapter):
                 await tb.wait_for(state="visible", timeout=15000)  # 增加到 15 秒
                 await tb.press("Enter", timeout=10000)  # 增加到 10 秒
                 self._log("ask: Enter pressed")
-                # Enter 后也检查一下是否发送了
+                # Enter 后也检查一下是否发送了（使用统一的获取方法）
                 await asyncio.sleep(0.5)
                 try:
-                    textbox_content_after_enter = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
+                    textbox_content_after_enter = await self._tb_get_text(tb)
                     textbox_len_after_enter = len(textbox_content_after_enter.strip())
                     if textbox_len_after_enter < textbox_len_before_send * 0.5:
                         self._log(f"send: confirmed sent via Enter (textbox len: {textbox_len_before_send} -> {textbox_len_after_enter})")
@@ -699,12 +746,27 @@ class GeminiAdapter(SiteAdapter):
                     # 尝试 Control+Enter 作为备选
                     await tb.press("Control+Enter", timeout=10000)  # 增加到 10 秒
                     self._log("ask: Control+Enter pressed")
-                    sent = True
+                    # Control+Enter 后也检查一下是否发送了
+                    await asyncio.sleep(0.5)
+                    try:
+                        textbox_content_after_ctrl = await self._tb_get_text(tb)
+                        textbox_len_after_ctrl = len(textbox_content_after_ctrl.strip())
+                        if textbox_len_after_ctrl < textbox_len_before_send * 0.5:
+                            self._log(f"send: confirmed sent via Control+Enter (textbox len: {textbox_len_before_send} -> {textbox_len_after_ctrl})")
+                            sent = True
+                    except Exception:
+                        pass
                 except Exception as e2:
                     self._log(f"ask: Control+Enter also failed: {e2}")
-                    # 即使都失败了，也不抛出异常，因为可能已经发送了
-                    if not sent:
-                        raise RuntimeError(f"ask: both Enter and Control+Enter failed. Enter_err={e}, CtrlEnter_err={e2}")
+                    # 如果所有方法都失败，触发 manual checkpoint
+                    await self.save_artifacts("gemini_send_failed")
+                    await self.manual_checkpoint(
+                        "Gemini 发送失败（按钮点击、Enter、Control+Enter 都失败）。请手动发送后继续。",
+                        ready_check=lambda: True,  # 简单的 ready check
+                        max_wait_s=60,
+                    )
+                    # manual checkpoint 后假设已发送
+                    sent = True
             
         # --- 6. 等待回复 (流式检测) ---
         self._log(f"ask: send phase done ({time.time()-t_send:.2f}s)")

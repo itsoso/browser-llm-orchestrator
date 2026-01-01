@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Awaitable, Callable, List, Optional, Tuple
 
-from playwright.async_api import BrowserContext, Page, async_playwright
+from playwright.async_api import BrowserContext, Locator, Page, async_playwright
 
 from ..utils import beijing_now_iso, utc_now_iso
 
@@ -474,6 +474,117 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             logger(f"clean_newlines: cleaned {newline_count} newlines from prompt (original_len={len(original_prompt)}, cleaned_len={len(prompt)})")
         
         return prompt
+
+    async def _tb_kind(self, tb: Locator) -> str:
+        """
+        判断 textbox 类型：'textarea' | 'contenteditable' | 'unknown'
+        
+        Args:
+            tb: Playwright Locator 对象
+            
+        Returns:
+            元素类型字符串
+        """
+        try:
+            return await tb.evaluate("""(el) => {
+                const tag = (el.tagName || '').toLowerCase();
+                if (tag === 'textarea' || tag === 'input') return 'textarea';
+                if (el.isContentEditable) return 'contenteditable';
+                return 'unknown';
+            }""")
+        except Exception:
+            return "unknown"
+
+    async def _tb_get_text(self, tb: Locator) -> str:
+        """
+        统一获取 textbox 文本内容，自动适配 textarea 和 contenteditable。
+        
+        Args:
+            tb: Playwright Locator 对象
+            
+        Returns:
+            文本内容字符串
+        """
+        kind = await self._tb_kind(tb)
+        try:
+            if kind == "textarea":
+                return (await tb.input_value()) or ""
+            # contenteditable
+            return (await tb.evaluate("(el) => el.innerText || el.textContent || ''")) or ""
+        except Exception:
+            return ""
+
+    async def _tb_clear(self, tb: Locator) -> None:
+        """
+        统一清空 textbox，优先使用"用户等价"操作（Ctrl+A → Backspace），
+        避免破坏编辑器 DOM 结构（如 ProseMirror）。
+        
+        Args:
+            tb: Playwright Locator 对象
+        """
+        # 首选用户等价清空，避免破坏编辑器 DOM
+        try:
+            await tb.focus()
+            # Mac 上 Meta+A 更常见；Windows/Linux 用 Control+A
+            try:
+                await tb.press("Meta+A")
+            except Exception:
+                try:
+                    await tb.press("Control+A")
+                except Exception:
+                    pass
+            await tb.press("Backspace")
+            # 验证是否清空
+            await asyncio.sleep(0.1)
+            text_after = await self._tb_get_text(tb)
+            if not text_after.strip():
+                return  # 清空成功
+        except Exception:
+            pass
+
+        # 兜底：按类型轻量 JS 清空（不要 innerHTML=''，避免破坏 ProseMirror）
+        try:
+            kind = await self._tb_kind(tb)
+            if kind == "textarea":
+                await tb.evaluate("""(el) => { 
+                    el.value = ''; 
+                    el.dispatchEvent(new Event('input', {bubbles:true})); 
+                }""")
+            else:
+                # contenteditable：只清 innerText/textContent，不清 innerHTML
+                await tb.evaluate("""(el) => { 
+                    el.innerText = ''; 
+                    el.textContent = ''; 
+                    el.dispatchEvent(new Event('input', {bubbles:true})); 
+                }""")
+        except Exception:
+            pass
+
+    async def _tb_set_text(self, tb: Locator, text: str) -> None:
+        """
+        统一设置 textbox 文本内容，自动适配 textarea 和 contenteditable。
+        
+        Args:
+            tb: Playwright Locator 对象
+            text: 要设置的文本内容
+        """
+        kind = await self._tb_kind(tb)
+        await tb.focus()
+        if kind == "textarea":
+            # textarea 用 fill 最稳
+            await tb.fill(text)
+            return
+
+        # contenteditable：用 insertText 更接近真实输入；失败再 innerText
+        try:
+            await tb.evaluate("""(el, t) => {
+                el.focus();
+                const ok = document.execCommand && document.execCommand('insertText', false, t);
+                if (!ok) el.innerText = t;
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+            }""", text)
+        except Exception:
+            await tb.type(text, delay=0)
 
     async def try_click(self, selectors: List[str], timeout_ms: int = 1500) -> bool:
         for sel in selectors:

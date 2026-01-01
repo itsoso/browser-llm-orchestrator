@@ -514,18 +514,34 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
     # 虽然看起来慢了 5 秒，但能避免 60 秒的资源争抢卡顿
     stagger_start_s = float(brief.output.get("stagger_start_s", 5) or 5)
 
-    coros = []
-    async def _run_with_delay(delay_s: float, coro):
+    all_results: List[ModelResult] = []
+    # 记录每个站点的耗时
+    site_durations: Dict[str, float] = {}
+    
+    # 包装函数：同时处理延迟启动和耗时记录
+    async def _run_with_delay_and_timing(site_id: str, delay_s: float, coro):
         if delay_s > 0:
             await asyncio.sleep(delay_s)
-        return await coro
-
+        site_t0 = time.perf_counter()
+        try:
+            result = await coro
+            site_t1 = time.perf_counter()
+            site_durations[site_id] = max(0.0, site_t1 - site_t0)
+            return result
+        except Exception as e:
+            site_t1 = time.perf_counter()
+            site_durations[site_id] = max(0.0, site_t1 - site_t0)
+            raise e
+    
+    # 构建 coros，同时处理延迟启动和耗时记录
+    coros = []
     for idx, (site_id, ts) in enumerate(site_map.items()):
         delay_s = max(0.0, stagger_start_s * idx)
         coros.append(
-            _run_with_delay(
-                delay_s,
-                run_site_worker(
+            _run_with_delay_and_timing(
+                site_id=site_id,
+                delay_s=delay_s,
+                coro=run_site_worker(
                     site_id=site_id,
                     tasks=ts,
                     vault_paths=vault_paths,
@@ -539,8 +555,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
                 ),
             )
         )
-
-    all_results: List[ModelResult] = []
+    
     all_results_nested = await asyncio.gather(*coros, return_exceptions=True)
 
     for item in all_results_nested:
@@ -549,7 +564,10 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
             continue
         all_results.extend(item)
 
+    # 记录 synthesis 的耗时
+    synthesis_duration = 0.0
     try:
+        synthesis_t0 = time.perf_counter()
         await run_synthesis_and_final(
             brief=brief,
             run_id=run_id,
@@ -560,15 +578,31 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
             tags=tags,
             headless=headless,
         )
+        synthesis_t1 = time.perf_counter()
+        synthesis_duration = max(0.0, synthesis_t1 - synthesis_t0)
     except Exception as e:
+        synthesis_t1 = time.perf_counter()
+        synthesis_duration = max(0.0, synthesis_t1 - synthesis_t0)
         print(f"[{beijing_now_iso()}] [synthesis] failed: {e}", flush=True)
 
     global_t1 = time.perf_counter()
+    total_duration = max(0.0, global_t1 - global_t0)
+    
+    # 打印详细的耗时统计
     print(
         f"[{beijing_now_iso()}] [run_all] end | results={len(all_results)}/{total_tasks} "
-        f"| dur={_fmt_secs(max(0.0, global_t1 - global_t0))} "
+        f"| dur={_fmt_secs(total_duration)} "
         f"| local={_now_local_iso()} | utc={_now_utc_iso()}",
         flush=True,
     )
+    
+    # 打印各 LLM 的处理耗时
+    print(f"[{beijing_now_iso()}] [run_all] timing breakdown:", flush=True)
+    for site_id in sorted(site_map.keys()):
+        if site_id in site_durations:
+            print(f"[{beijing_now_iso()}] [run_all]   {site_id}: {_fmt_secs(site_durations[site_id])}", flush=True)
+    if synthesis_duration > 0:
+        print(f"[{beijing_now_iso()}] [run_all]   synthesis: {_fmt_secs(synthesis_duration)}", flush=True)
+    print(f"[{beijing_now_iso()}] [run_all]   total: {_fmt_secs(total_duration)}", flush=True)
 
     return run_index_path, all_results
