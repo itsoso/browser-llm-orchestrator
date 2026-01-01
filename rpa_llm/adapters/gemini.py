@@ -442,6 +442,7 @@ class GeminiAdapter(SiteAdapter):
                     sent_confirmed = False
                     
                     # 方法1: 检查输入框内容是否清空（快速但可能不准确）
+                    textbox_len_after = textbox_len_before_send  # 初始化
                     try:
                         textbox_content_after = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
                         textbox_len_after = len(textbox_content_after.strip())
@@ -452,36 +453,75 @@ class GeminiAdapter(SiteAdapter):
                             # 内容部分减少，可能是发送了但页面还在处理
                             self._log(f"send: textbox partially cleared (len: {textbox_len_before_send} -> {textbox_len_after}), likely sent")
                             sent_confirmed = True
-                        else:
-                            self._log(f"send: textbox still has content after button click (len={textbox_len_after}), checking response...")
+                        # 注意：如果输入框仍有内容，不立即输出警告，先进行响应检测
                     except Exception:
                         # 如果无法读取输入框，假设已发送（可能是页面正在刷新）
                         self._log("send: cannot read textbox after click, assuming sent")
                         sent_confirmed = True
                     
-                    # 方法2: 等待一小段时间，检查是否有响应开始（更可靠）
+                    # 方法2: 先进行快速响应检测（1秒），如果成功就不输出警告
                     if not sent_confirmed:
                         try:
-                            # 优化：增加等待时间，从1秒增加到2秒，给响应更多时间开始
+                            # 优化：先快速检查一次（1秒），如果检测到响应就不输出警告
+                            await asyncio.sleep(1.0)
+                            assistant_text_quick = await self._last_assistant_text()
+                            assistant_len_quick = len(assistant_text_quick.strip()) if assistant_text_quick else 0
+                            
+                            # 如果响应长度明显增加（>5%），认为已发送
+                            if assistant_len_quick > 20:  # 如果有足够长的响应，认为已发送
+                                self._log(f"send: confirmed sent via quick response detection (len={assistant_len_quick})")
+                                sent_confirmed = True
+                        except Exception:
+                            pass  # 快速检测失败，继续正常流程
+                    
+                    # 方法3: 等待更长时间，检查是否有响应开始（更可靠）
+                    if not sent_confirmed:
+                        try:
+                            # 优化：由于已经等待了1秒，这里再等待2秒即可（总共3秒）
                             await asyncio.sleep(2.0)
                             # 优化：记录发送前的 assistant 文本，用于比较
                             assistant_text_before_send = await self._last_assistant_text()
-                            # 等待后再检查
+                            assistant_len_before_send = len(assistant_text_before_send.strip()) if assistant_text_before_send else 0
+                            
+                            # 等待后再检查（检查响应是否在增长）
                             await asyncio.sleep(0.5)
-                            assistant_text_after = await self._last_assistant_text()
-                            # 优化：检查文本是否变化，而不仅仅是长度
-                            if assistant_text_after and assistant_text_after != assistant_text_before_send:
+                            assistant_text_after_1 = await self._last_assistant_text()
+                            assistant_len_after_1 = len(assistant_text_after_1.strip()) if assistant_text_after_1 else 0
+                            
+                            # 再等待一次，检查响应是否在增长
+                            await asyncio.sleep(0.5)
+                            assistant_text_after_2 = await self._last_assistant_text()
+                            assistant_len_after_2 = len(assistant_text_after_2.strip()) if assistant_text_after_2 else 0
+                            
+                            # 优化：检查文本是否变化，或响应是否在增长
+                            if assistant_text_after_2 and assistant_text_after_2 != assistant_text_before_send:
                                 # 文本发生变化，说明有新响应
-                                self._log(f"send: confirmed sent via response detection (text changed, len={len(assistant_text_after)})")
+                                self._log(f"send: confirmed sent via response detection (text changed, len={assistant_len_after_2})")
                                 sent_confirmed = True
-                            elif assistant_text_after and len(assistant_text_after.strip()) > 20:  # 如果有足够长的响应，也认为已发送
-                                self._log(f"send: confirmed sent via response detection (response_len={len(assistant_text_after)})")
+                            elif assistant_len_after_2 > assistant_len_before_send * 1.1:
+                                # 响应长度明显增加（>10%），说明有新响应
+                                self._log(f"send: confirmed sent via response growth (len: {assistant_len_before_send} -> {assistant_len_after_2}, +{assistant_len_after_2 - assistant_len_before_send})")
+                                sent_confirmed = True
+                            elif assistant_len_after_2 > assistant_len_after_1 * 1.05:
+                                # 响应在增长（>5%），说明有新响应
+                                self._log(f"send: confirmed sent via response growth (len: {assistant_len_after_1} -> {assistant_len_after_2}, growing)")
+                                sent_confirmed = True
+                            elif assistant_text_after_2 and len(assistant_text_after_2.strip()) > 20:  # 如果有足够长的响应，也认为已发送
+                                self._log(f"send: confirmed sent via response detection (response_len={assistant_len_after_2})")
                                 sent_confirmed = True
                         except Exception:
                             pass
                     
+                    # 如果已确认发送，不输出误报警告
                     if sent_confirmed:
+                        # 不输出误报警告，因为已经确认发送
                         break
+                    else:
+                        # 只有在所有检测都失败时才输出警告
+                        # 注意：只有在输入框仍有内容（>=70%）且响应检测也失败时才输出警告
+                        if textbox_len_after >= textbox_len_before_send * 0.7:
+                            self._log(f"send: warning - textbox still has content after button click (len={textbox_len_after}), may not have sent")
+                    # 即使未确认，也继续（可能已经发送但检测不到）
                     # 即使未确认，也继续（可能已经发送但检测不到）
             except Exception as e:
                 self._log(f"send: button click failed for {btn_sel}: {e}")

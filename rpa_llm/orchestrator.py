@@ -20,7 +20,7 @@ from .adapters import create_adapter
 from .driver_client import run_task as driver_run_task
 from .models import Brief, ModelResult, StreamSpec, Task
 from .prompts import SynthesisPromptConfig, build_dual_model_arbitration_prompt
-from .utils import beijing_now_iso, ensure_dir, utc_now_iso
+from .utils import beijing_now_iso, ensure_dir, slugify, utc_now_iso
 from .vault import (
     build_run_index_note,
     make_model_output_filename,
@@ -421,7 +421,8 @@ async def run_synthesis_and_final(
         flush=True,
     )
 
-    synth_path = vault_paths["synth"] / f"synthesis__{arbitrator_site}.md"
+    topic_slug = slugify(brief.topic, max_len=40)  # 主题缩略，最多40字符
+    synth_path = vault_paths["synth"] / f"synthesis__{arbitrator_site}__{topic_slug}.md"
     fm_s = {
         "type": ["synthesis"],
         "created": started_local,
@@ -436,7 +437,7 @@ async def run_synthesis_and_final(
     }
     write_markdown(synth_path, fm_s, answer)
 
-    final_path = vault_paths["final"] / f"final__{arbitrator_site}.md"
+    final_path = vault_paths["final"] / f"final__{arbitrator_site}__{topic_slug}.md"
     fm_f = {
         "type": ["final_decision"],
         "created": started_local,

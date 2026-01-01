@@ -1028,39 +1028,84 @@ class ChatGPTAdapter(SiteAdapter):
             t0 = time.time()
             hb = t0
             user_wait_timeout = min(30, remaining - 5)  # 优化：从45秒减少到30秒
-            while time.time() - t0 < user_wait_timeout:
-                elapsed = time.time() - ask_start_time
-                if elapsed >= timeout_s - 5:  # 留5秒缓冲
-                    break
-                
-                # 优化：快速路径 - 如果 assistant_count 已经增加，推断 user_count 也应该增加
-                try:
-                    n_assist_check = await asyncio.wait_for(self._assistant_count(), timeout=2.0)
-                    if n_assist_check > n_assist0:
-                        self._log(f"ask: assistant_count increased ({n_assist_check} > {n_assist0}), assuming user message sent")
+            
+            # 优化：先快速检查一次，如果 assistant_count 已经增加，直接跳过
+            try:
+                await asyncio.sleep(0.1)  # 给页面一点时间更新
+                n_assist_quick = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
+                if n_assist_quick > n_assist0:
+                    self._log(f"ask: assistant_count increased quickly ({n_assist_quick} > {n_assist0}), assuming user message sent")
+                    # 快速路径成功，直接跳过后续等待
+                else:
+                    # 快速路径失败，进入正常检测流程
+                    while time.time() - t0 < user_wait_timeout:
+                        elapsed = time.time() - ask_start_time
+                        if elapsed >= timeout_s - 5:  # 留5秒缓冲
+                            break
+                        
+                        # 优化：快速路径 - 如果 assistant_count 已经增加，推断 user_count 也应该增加
+                        try:
+                            n_assist_check = await asyncio.wait_for(self._assistant_count(), timeout=1.5)
+                            if n_assist_check > n_assist0:
+                                self._log(f"ask: assistant_count increased ({n_assist_check} > {n_assist0}), assuming user message sent")
+                                break
+                        except Exception:
+                            pass  # 检查失败不影响主流程
+                        
+                        try:
+                            # _user_count() 内部已有 8 秒超时，这里不再额外包装
+                            # 直接调用，如果超时会抛出 TimeoutError
+                            user1 = await self._user_count()
+                            if user1 > user0:
+                                self._log(f"ask: user_count(after)={user1} (sent OK)")
+                                break
+                        except asyncio.TimeoutError:
+                            # _user_count() 内部超时，但可能只是某个选择器失败，继续尝试
+                            # 优化：减少日志输出频率，避免日志过多
+                            pass  # 静默重试，减少日志噪音
+                        except Exception as e:
+                            self._log(f"ask: user_count() error: {e}")
+                        
+                        if time.time() - hb >= 5:
+                            self._log("ask: still waiting user message to appear...")
+                            hb = time.time()
+                        # 优化：减少重试间隔，从0.3秒减少到0.2秒，加快检测速度
+                        await asyncio.sleep(0.2)
+            except Exception:
+                # 快速检查失败，进入正常检测流程
+                while time.time() - t0 < user_wait_timeout:
+                    elapsed = time.time() - ask_start_time
+                    if elapsed >= timeout_s - 5:  # 留5秒缓冲
                         break
-                except Exception:
-                    pass  # 检查失败不影响主流程
-                
-                try:
-                    # _user_count() 内部已有 8 秒超时，这里不再额外包装
-                    # 直接调用，如果超时会抛出 TimeoutError
-                    user1 = await self._user_count()
-                    if user1 > user0:
-                        self._log(f"ask: user_count(after)={user1} (sent OK)")
-                        break
-                except asyncio.TimeoutError:
-                    # _user_count() 内部超时，但可能只是某个选择器失败，继续尝试
-                    # 优化：减少日志输出频率，避免日志过多
-                    pass  # 静默重试，减少日志噪音
-                except Exception as e:
-                    self._log(f"ask: user_count() error: {e}")
-                
-                if time.time() - hb >= 5:
-                    self._log("ask: still waiting user message to appear...")
-                    hb = time.time()
-                # 优化：减少重试间隔，从0.5秒减少到0.3秒，加快检测速度
-                await asyncio.sleep(0.3)
+                    
+                    # 优化：快速路径 - 如果 assistant_count 已经增加，推断 user_count 也应该增加
+                    try:
+                        n_assist_check = await asyncio.wait_for(self._assistant_count(), timeout=1.5)
+                        if n_assist_check > n_assist0:
+                            self._log(f"ask: assistant_count increased ({n_assist_check} > {n_assist0}), assuming user message sent")
+                            break
+                    except Exception:
+                        pass  # 检查失败不影响主流程
+                    
+                    try:
+                        # _user_count() 内部已有 8 秒超时，这里不再额外包装
+                        # 直接调用，如果超时会抛出 TimeoutError
+                        user1 = await self._user_count()
+                        if user1 > user0:
+                            self._log(f"ask: user_count(after)={user1} (sent OK)")
+                            break
+                    except asyncio.TimeoutError:
+                        # _user_count() 内部超时，但可能只是某个选择器失败，继续尝试
+                        # 优化：减少日志输出频率，避免日志过多
+                        pass  # 静默重试，减少日志噪音
+                    except Exception as e:
+                        self._log(f"ask: user_count() error: {e}")
+                    
+                    if time.time() - hb >= 5:
+                        self._log("ask: still waiting user message to appear...")
+                        hb = time.time()
+                    # 优化：减少重试间隔，从0.3秒减少到0.2秒，加快检测速度
+                    await asyncio.sleep(0.2)
             else:
                 await self.save_artifacts("send_not_confirmed")
                 await self.manual_checkpoint(
@@ -1076,6 +1121,7 @@ class ChatGPTAdapter(SiteAdapter):
             elapsed = time.time() - ask_start_time
             remaining = timeout_s - elapsed
             assistant_wait_timeout = min(remaining * 0.6, 180)  # 最多用60%的时间等待assistant出现，但不超过180秒
+            n_assist1 = n_assist0  # 初始化，确保在循环外也能访问
             
             while time.time() - t1 < assistant_wait_timeout:
                 elapsed = time.time() - ask_start_time
@@ -1113,15 +1159,27 @@ class ChatGPTAdapter(SiteAdapter):
             new_message_found = False
             elapsed = time.time() - ask_start_time
             remaining = timeout_s - elapsed
-            # 优化：减少超时时间，从30秒减少到15秒
-            content_wait_timeout = min(15, remaining * 0.2)  # 最多15秒或剩余时间的20%
+            last_assist_text_len_before = len(last_assist_text_before)
+            
+            # 优化：如果 assistant_count 已经增加，减少超时时间
+            # 如果 assistant_count 已经增加，最多等待5秒；否则等待10秒
+            if n_assist1 > n_assist0:
+                content_wait_timeout = min(5, remaining * 0.1)  # 最多5秒或剩余时间的10%
+            else:
+                content_wait_timeout = min(10, remaining * 0.15)  # 最多10秒或剩余时间的15%
             
             # 优化：快速路径 - 先快速检查一次，如果已经有新内容，直接跳过
             try:
                 current_text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=1.0)
-                if current_text_quick and current_text_quick != last_assist_text_before:
-                    new_message_found = True
-                    self._log(f"ask: new message content detected quickly (len={len(current_text_quick)})")
+                if current_text_quick:
+                    # 方法1: 检查文本是否不同
+                    if current_text_quick != last_assist_text_before:
+                        new_message_found = True
+                        self._log(f"ask: new message content detected quickly (len={len(current_text_quick)})")
+                    # 方法2: 如果文本相同但长度明显增加（>1.2倍），也认为有新消息（可能是内容更新）
+                    elif len(current_text_quick) > last_assist_text_len_before * 1.2:
+                        new_message_found = True
+                        self._log(f"ask: new message content detected via length increase (len={len(current_text_quick)} vs {last_assist_text_len_before}, ratio={len(current_text_quick)/last_assist_text_len_before:.2f}x)")
             except Exception:
                 pass  # 快速检查失败，继续正常流程
             
@@ -1132,11 +1190,17 @@ class ChatGPTAdapter(SiteAdapter):
                         break
                     try:
                         current_text = await asyncio.wait_for(self._last_assistant_text(), timeout=1.5)  # 优化：减少超时时间
-                        # 新消息必须：1) 有内容 2) 与发送前的消息不同
-                        if current_text and current_text != last_assist_text_before:
-                            new_message_found = True
-                            self._log(f"ask: new message content detected (len={len(current_text)})")
-                            break
+                        if current_text:
+                            # 方法1: 检查文本是否不同
+                            if current_text != last_assist_text_before:
+                                new_message_found = True
+                                self._log(f"ask: new message content detected (len={len(current_text)})")
+                                break
+                            # 方法2: 如果文本相同但长度明显增加（>1.2倍），也认为有新消息
+                            elif len(current_text) > last_assist_text_len_before * 1.2:
+                                new_message_found = True
+                                self._log(f"ask: new message content detected via length increase (len={len(current_text)} vs {last_assist_text_len_before}, ratio={len(current_text)/last_assist_text_len_before:.2f}x)")
+                                break
                     except asyncio.TimeoutError:
                         pass
                     except Exception as e:
@@ -1145,8 +1209,8 @@ class ChatGPTAdapter(SiteAdapter):
                     if time.time() - hb >= 5:
                         self._log(f"ask: still waiting for new message content... (elapsed={elapsed:.1f}s/{timeout_s}s)")
                         hb = time.time()
-                    # 优化：减少等待间隔，从0.6秒减少到0.4秒
-                    await asyncio.sleep(0.4)
+                    # 优化：减少等待间隔，从0.4秒减少到0.3秒
+                    await asyncio.sleep(0.3)
             
             if not new_message_found:
                 self._log("ask: warning: new message content not confirmed, but continuing...")
