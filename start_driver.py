@@ -1,11 +1,10 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Author: xiaofan with Codex Cusor
 Created: 2025-12-30 16:33:45 +0800
 Modified: 2025-12-30 18:37:59 +0800
-"""
-#!/usr/bin/env python3
-"""
+
 从 brief.yaml 读取配置并启动 driver_server
 """
 from __future__ import annotations
