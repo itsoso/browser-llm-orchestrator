@@ -72,6 +72,28 @@ class SiteAdapter(ABC):
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
+        # 清理可能存在的过时锁文件（避免 "profile already in use" 错误）
+        # Chrome 使用 SingletonLock、SingletonCookie、SingletonSocket 来防止多实例
+        singleton_files = [
+            self.profile_dir / "SingletonLock",
+            self.profile_dir / "SingletonCookie",
+            self.profile_dir / "SingletonSocket",
+        ]
+        for lock_file in singleton_files:
+            if lock_file.exists():
+                try:
+                    # 如果是符号链接，删除链接本身
+                    if lock_file.is_symlink():
+                        lock_file.unlink()
+                        print(f"[{beijing_now_iso()}] [{self.site_id}] cleaned stale lock: {lock_file.name}", flush=True)
+                    # 如果是普通文件，也尝试删除
+                    elif lock_file.is_file():
+                        lock_file.unlink()
+                        print(f"[{beijing_now_iso()}] [{self.site_id}] cleaned stale lock: {lock_file.name}", flush=True)
+                except Exception as e:
+                    # 如果删除失败（可能正在使用），记录但不阻塞
+                    print(f"[{beijing_now_iso()}] [{self.site_id}] warning: could not clean lock {lock_file.name}: {e}", flush=True)
+
         self._pw = await async_playwright().start()
 
         chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -276,6 +298,14 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             t1 = time.perf_counter()
             self._perf["goto"]["end_utc"] = utc_now_iso()
             self._perf["goto"]["duration_s"] = max(0.0, t1 - t0)
+        else:
+            try:
+                print(
+                    f"[{beijing_now_iso()}] [{self.site_id}] goto(skip) already at base_url",
+                    flush=True,
+                )
+            except Exception:
+                pass
         
         # 等待页面基本就绪（但不等待所有资源）
         # 对于 SPA，commit 后 DOM 可能还没完全加载，给一点时间让 React/Vue 挂载

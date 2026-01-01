@@ -239,6 +239,24 @@ class ChatGPTAdapter(SiteAdapter):
         await self._dismiss_overlays()
         return (await self._find_textbox_any_frame()) is not None
 
+    async def _fast_ready_check(self) -> bool:
+        """
+        Fast-path textbox check to avoid expensive frame scans on already-loaded pages.
+        """
+        try:
+            loc = self.page.locator('div[id="prompt-textarea"]').first
+            if await loc.count() > 0 and await loc.is_visible():
+                return True
+        except Exception:
+            pass
+        try:
+            loc = self.page.locator('div[contenteditable="true"][role="textbox"]').first
+            if await loc.count() > 0 and await loc.is_visible():
+                return True
+        except Exception:
+            pass
+        return False
+
     async def _set_thinking_toggle(self, want_thinking: bool) -> None:
         for sel in self.THINKING_TOGGLE:
             try:
@@ -321,6 +339,14 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("ensure_ready: start")
         # 减少初始延迟，页面可能已经加载完成
         await asyncio.sleep(0.2)
+        # 快速路径：直接用最稳定的选择器探测
+        try:
+            loc = self.page.locator('div[id="prompt-textarea"]').first
+            if await loc.count() > 0 and await loc.is_visible():
+                self._log("ensure_ready: fast path via prompt-textarea")
+                return
+        except Exception:
+            pass
 
         # Cloudflare 直接进入人工点一次（但支持 auto-continue）
         if await self._is_cloudflare():
@@ -329,6 +355,10 @@ class ChatGPTAdapter(SiteAdapter):
                 ready_check=self._ready_check_textbox,
                 max_wait_s=90,
             )
+
+        if await self._fast_ready_check():
+            self._log("ensure_ready: fast-path textbox visible")
+            return
 
         total_timeout_s = 60
         t0 = time.time()
@@ -380,21 +410,30 @@ class ChatGPTAdapter(SiteAdapter):
         """
         获取 assistant 消息数量，使用并行执行优化性能。
         如果所有选择器都失败，返回 0。
+        优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
         """
         async def try_selector(sel: str) -> Optional[int]:
             """尝试单个选择器，返回计数或 None"""
             try:
-                # 减少单个选择器超时，从无限制到3秒
+                # 优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
                 return await asyncio.wait_for(
                     self.page.locator(sel).count(),
-                    timeout=3.0
+                    timeout=1.5
                 )
             except (asyncio.TimeoutError, Exception):
                 return None
         
         # 并行尝试所有选择器，取第一个成功的结果
         tasks = [try_selector(sel) for sel in self.ASSISTANT_MSG]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 优化：添加总超时保护，整个方法最多等待2秒
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            # 如果总超时，返回0（表示未找到）
+            return 0
         
         # 找到第一个成功的结果（非 None，非异常）
         for result in results:
@@ -407,21 +446,30 @@ class ChatGPTAdapter(SiteAdapter):
         """
         获取用户消息数量，使用并行执行优化性能。
         如果所有选择器都失败，返回 0。
+        优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
         """
         async def try_selector(sel: str) -> Optional[int]:
             """尝试单个选择器，返回计数或 None"""
             try:
-                # 减少单个选择器超时，从8秒减少到3秒
+                # 优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
                 return await asyncio.wait_for(
                     self.page.locator(sel).count(),
-                    timeout=3.0
+                    timeout=1.5
                 )
             except (asyncio.TimeoutError, Exception):
                 return None
         
         # 并行尝试所有选择器，取第一个成功的结果
         tasks = [try_selector(sel) for sel in self.USER_MSG]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 优化：添加总超时保护，整个方法最多等待2秒
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            # 如果总超时，返回0（表示未找到）
+            return 0
         
         # 找到第一个成功的结果（非 None，非异常）
         for result in results:
@@ -494,13 +542,19 @@ class ChatGPTAdapter(SiteAdapter):
                 # 最后一次尝试失败，保存截图并触发 manual checkpoint
                 await self.save_artifacts("send_no_textbox")
                 await self.manual_checkpoint(
-                "发送前未找到输入框，请手动点一下输入框后继续。",
-                ready_check=self._ready_check_textbox,
-                max_wait_s=60,
-            )
-            found = await self._find_textbox_any_frame()
-            if not found:
-                    raise RuntimeError("send: textbox not found")
+                    "发送前未找到输入框，请手动点一下输入框后继续。",
+                    ready_check=self._ready_check_textbox,
+                    max_wait_s=60,
+                )
+                # manual_checkpoint 后再次尝试查找
+                found = await self._find_textbox_any_frame()
+                if not found:
+                    # 如果 manual_checkpoint 后仍然找不到，抛出异常
+                    raise RuntimeError("send: textbox not found after manual checkpoint")
+        
+        # 确保找到了 textbox
+        if not found:
+            raise RuntimeError("send: textbox not found after all retries")
 
         tb, frame, how = found
         self._log(f"send: textbox via {how} frame={frame.url}")
@@ -540,11 +594,14 @@ class ChatGPTAdapter(SiteAdapter):
                     # 使用 "attached" 状态更宽松，因为元素可能暂时不可见但已附加到 DOM
                     await tb.wait_for(state="attached", timeout=10000)
                     
+                    # 优化：在 Thinking 模式渲染时，主线程可能太忙，先给页面一口喘息的机会
+                    await asyncio.sleep(0.5)  # 等待 500ms，让页面稳定
+                    
                     # 多次清空，确保彻底清除（React 状态可能需要多次更新）
                     for clear_attempt in range(3):
                         await asyncio.wait_for(
                             tb.evaluate("el => { el.innerText = ''; el.innerHTML = ''; el.textContent = ''; }"),
-                            timeout=5.0
+                            timeout=3.0  # 优化：减少超时从 5.0 秒到 3.0 秒，加快失败检测
                         )
                         # 触发 input 事件，确保 React 状态更新
                         await tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))")
@@ -594,18 +651,35 @@ class ChatGPTAdapter(SiteAdapter):
                         
                         await tb.wait_for(state="attached", timeout=10000)
                         import json
-                        js_code = f"el => {{ el.innerText = {json.dumps(prompt)}; }}"
+                        # 优化：增强 JS 注入，触发所有关键事件以确保 React/Angular 状态同步
+                        js_code = f"""
+                        (el, text) => {{
+                            el.focus();
+                            // 兼容多种框架的输入方式
+                            if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') {{
+                                const fullText = {json.dumps(prompt)};
+                                if (el.contentEditable === 'true') {{
+                                    el.innerText = fullText;
+                                }} else {{
+                                    el.value = fullText;
+                                }}
+                                
+                                // 关键：按顺序触发所有状态更新事件
+                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                el.dispatchEvent(new InputEvent('beforeinput', {{ bubbles: true, inputType: 'insertText', data: '' }}));
+                                el.dispatchEvent(new KeyboardEvent('keydown', {{ bubbles: true, key: 'Enter' }}));
+                                el.blur(); // 有时失焦能强制同步状态
+                                el.focus(); // 重新聚焦，确保按钮状态更新
+                            }}
+                        }}
+                        """
                         await asyncio.wait_for(
                             tb.evaluate(js_code),
                             timeout=20.0
                         )
-                        await asyncio.wait_for(tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"), timeout=10.0)
-                        await asyncio.wait_for(
-                            tb.evaluate("el => el.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, inputType: 'insertText', data: ''}))"),
-                            timeout=10.0,
-                        )
                         await self._arm_input_events(tb)
-                        self._log("send: injected via JS + triggered input events")
+                        self._log("send: injected via JS + triggered all input events (input/change/beforeinput/keydown/blur/focus)")
                         
                         # JS 注入后也检查是否已经发送
                         await asyncio.sleep(0.2)
@@ -945,6 +1019,8 @@ class ChatGPTAdapter(SiteAdapter):
             pass  # 检查失败不影响发送逻辑
         
         self._log("send: triggering send...")
+        send_phase_start = time.time()
+        send_phase_max_s = float(os.environ.get("CHATGPT_SEND_PHASE_MAX_S", "8.0"))
 
         # 步骤 1: 尝试 Enter (最快)
         try:
@@ -966,6 +1042,13 @@ class ChatGPTAdapter(SiteAdapter):
         await asyncio.sleep(0.5)
 
         # 再次检查是否已经发送（Enter 可能已经生效）
+        try:
+            user_count_check = await self._user_count()
+            if user_count_check > user_count_before_send:
+                self._log(f"send: confirmed sent after Enter (user_count={user_count_check}), skipping button attempts")
+                return  # 已发送，不需要继续
+        except Exception:
+            pass
         try:
             user_count_check = await self._user_count()
             if user_count_check > user_count_before_send:
@@ -1002,9 +1085,28 @@ class ChatGPTAdapter(SiteAdapter):
         except Exception:
             pass
 
+        if time.time() - send_phase_start >= send_phase_max_s:
+            # 优化：在跳过按钮前，最后检查一次是否已经发送
+            try:
+                user_count_final = await self._user_count()
+                if user_count_final > user_count_before_send:
+                    self._log(f"send: confirmed sent before skipping buttons (user_count={user_count_final}), skipping button attempts")
+                    return  # 已发送，不需要继续
+            except Exception:
+                pass
+            self._log(
+                f"send: send phase reached {send_phase_max_s:.1f}s, skipping button attempts to reduce latency"
+            )
+            return
+
         # 步骤 3: 最后才找按钮 (最慢，最容易失败)
         # 只有当前面两个都不行时，才去 DOM 里挖按钮
         for send_sel in self.SEND_BTN:
+            if time.time() - send_phase_start >= send_phase_max_s:
+                self._log(
+                    f"send: send phase reached {send_phase_max_s:.1f}s, stopping button attempts"
+                )
+                return
             try:
                 btn = frame.locator(send_sel).first
                 if await btn.is_visible(timeout=1000):
@@ -1038,8 +1140,32 @@ class ChatGPTAdapter(SiteAdapter):
             ask_start_time = time.time()
             self._log(f"ask: start (timeout={timeout_s}s)")
             
+            t_ready = time.time()
             await self.ensure_ready()
+            self._log(f"ask: ensure_ready done ({time.time()-t_ready:.2f}s)")
+            t_variant = time.time()
             await self.ensure_variant()
+            self._log(f"ask: ensure_variant done ({time.time()-t_variant:.2f}s)")
+            
+            # 优化：针对 Thinking 模式的 DOM 稳定逻辑
+            # ChatGPT 开启 Thinking 模式时，DOM 结构会从 Thinking 状态切换到 Text 状态
+            # 等待页面不再有大面积的重绘（动画结束）
+            try:
+                await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+                # 等待 Thinking 模式特有的加载图标消失或趋于稳定
+                await asyncio.sleep(0.5)
+                # 重新定位一次 Textbox，确保元素稳定
+                found = await self._find_textbox_any_frame()
+                if found:
+                    tb, frame, how = found
+                    try:
+                        await tb.focus(timeout=2000)
+                        self._log(f"ask: DOM stabilized, textbox refocused via {how}")
+                    except Exception:
+                        pass  # focus 失败不影响主流程
+            except Exception as e:
+                # 稳定化失败不影响主流程，记录日志即可
+                self._log(f"ask: DOM stabilization warning: {e}")
 
             # 是否每次新聊天（默认关闭，提高稳定性与速度）
             if self._new_chat_enabled():
@@ -1060,22 +1186,99 @@ class ChatGPTAdapter(SiteAdapter):
                 raise TimeoutError(f"ask: timeout before sending (elapsed={elapsed:.1f}s)")
 
             self._log("ask: sending prompt...")
+            t_send = time.time()
             await self._send_prompt(prompt)
+            self._log(f"ask: send phase done ({time.time()-t_send:.2f}s)")
 
             # 确认 user 消息出现（证明发送成功）
             self._log("ask: confirming user message appeared...")
+            t_confirm = time.time()
             t0 = time.time()
             hb = t0
             user_wait_timeout = min(20, remaining - 5)  # 优化：从30秒减少到20秒，加快检测
+            confirm_reason = ""
+            confirm_fast_start = time.time()
             
             # 优化：先快速检查一次，如果 assistant_count 已经增加，直接跳过
             user_confirmed = False
+            # 快速路径 A：输入框清空（使用 wait_for_function 更高效）
+            if not user_confirmed:
+                try:
+                    # 优化：增加超时时间从3秒到5秒，提高成功率
+                    # 同时检查多个可能的输入框属性
+                    await asyncio.wait_for(
+                        self.page.wait_for_function(
+                            """
+                            () => {
+                                const el = document.querySelector('div#prompt-textarea');
+                                if (!el) return false;
+                                const text = el.innerText?.trim() || el.textContent?.trim() || '';
+                                return text === '';
+                            }
+                            """,
+                            timeout=5000
+                        ),
+                        timeout=5.0
+                    )
+                    user_confirmed = True
+                    confirm_reason = "textbox_cleared"
+                    self._log("ask: fast confirm via textbox cleared (wait_for_function)")
+                except Exception:
+                    pass
+            # 快速路径 B：出现 Stop generating（使用 wait_for_selector 更高效）
+            if not user_confirmed:
+                try:
+                    # 优化：增加超时时间从2秒到4秒，提高成功率
+                    # 并行检查所有停止按钮选择器
+                    tasks = []
+                    for sel in self.STOP_BTN:
+                        async def check_stop_button(selector: str):
+                            try:
+                                await self.page.wait_for_selector(selector, state="visible", timeout=4000)
+                                return True
+                            except Exception:
+                                return False
+                        tasks.append(check_stop_button(sel))
+                    
+                    # 使用 gather 并行检查，取第一个成功的结果
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    # 检查是否有任何一个成功
+                    if any(r is True for r in results if not isinstance(r, Exception)):
+                        user_confirmed = True
+                        confirm_reason = "stop_button_visible"
+                        self._log("ask: fast confirm via stop button (wait_for_selector)")
+                except asyncio.TimeoutError:
+                    # 优化：明确捕获超时异常，避免 Future exception was never retrieved
+                    pass
+                except Exception:
+                    pass
+            # 快速路径 C：检查输入框的 value 属性（某些情况下 innerText 可能不更新）
+            if not user_confirmed:
+                try:
+                    # 直接检查 textbox 元素的状态
+                    tb_loc = self.page.locator('div[id="prompt-textarea"]').first
+                    if await tb_loc.count() > 0:
+                        # 等待输入框变空，最多等 2 秒
+                        for _ in range(10):  # 检查10次，每次0.2秒
+                            try:
+                                text_now = await asyncio.wait_for(tb_loc.inner_text(), timeout=0.3)
+                                if text_now is not None and text_now.strip() == "":
+                                    user_confirmed = True
+                                    confirm_reason = "textbox_cleared_direct"
+                                    self._log("ask: fast confirm via textbox cleared (direct check)")
+                                    break
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.2)
+                except Exception:
+                    pass
             try:
                 await asyncio.sleep(0.1)  # 给页面一点时间更新
                 n_assist_quick = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
                 if n_assist_quick > n_assist0:
                     self._log(f"ask: assistant_count increased quickly ({n_assist_quick} > {n_assist0}), assuming user message sent")
                     user_confirmed = True  # 快速路径成功，标记为已确认
+                    confirm_reason = "assistant_count_quick"
             except Exception:
                 pass  # 快速检查失败，继续正常流程
             
@@ -1092,6 +1295,7 @@ class ChatGPTAdapter(SiteAdapter):
                         if n_assist_check > n_assist0:
                             self._log(f"ask: assistant_count increased ({n_assist_check} > {n_assist0}), assuming user message sent")
                             user_confirmed = True
+                            confirm_reason = "assistant_count"
                             break
                     except Exception:
                         pass  # 检查失败不影响主流程
@@ -1103,6 +1307,7 @@ class ChatGPTAdapter(SiteAdapter):
                         if user1 > user0:
                             self._log(f"ask: user_count(after)={user1} (sent OK)")
                             user_confirmed = True
+                            confirm_reason = "user_count"
                             break
                     except asyncio.TimeoutError:
                         # _user_count() 内部超时，但可能只是某个选择器失败，继续尝试
@@ -1125,6 +1330,9 @@ class ChatGPTAdapter(SiteAdapter):
                     ready_check=self._ready_check_textbox,
                     max_wait_s=min(60, remaining - 5),
                 )
+            if confirm_reason:
+                self._log(f"ask: confirm reason={confirm_reason}")
+            self._log(f"ask: confirm phase done ({time.time()-t_confirm:.2f}s)")
 
             # 等待 assistant 消息出现（计数增加）
             self._log("ask: waiting for assistant message...")
@@ -1132,6 +1340,7 @@ class ChatGPTAdapter(SiteAdapter):
             hb = t1
             elapsed = time.time() - ask_start_time
             remaining = timeout_s - elapsed
+            assist_timeout_streak = 0
             # 优化：从180秒减少到120秒，先快速检查一次assistant_count
             try:
                 n_assist_quick_check = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
@@ -1157,6 +1366,7 @@ class ChatGPTAdapter(SiteAdapter):
                         break
                 except asyncio.TimeoutError:
                     self._log("ask: assistant_count() timeout, retrying...")
+                    assist_timeout_streak += 1
                 except Exception as e:
                     self._log(f"ask: assistant_count() error: {e}")
                     
@@ -1164,6 +1374,16 @@ class ChatGPTAdapter(SiteAdapter):
                     elapsed = time.time() - ask_start_time
                     self._log(f"ask: still waiting assistant message... (elapsed={elapsed:.1f}s/{timeout_s}s)")
                     hb = time.time()
+                # 超时过多，降级为文本变化检测以减少等待
+                if assist_timeout_streak >= 5:
+                    try:
+                        text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=1.0)
+                        if text_quick and text_quick != last_assist_text_before:
+                            self._log("ask: assistant_count timeout streak, using text change as signal")
+                            n_assist1 = n_assist0 + 1
+                            break
+                    except Exception:
+                        pass
                 await asyncio.sleep(0.6)
             else:
                 await self.save_artifacts("no_assistant_reply")
@@ -1172,6 +1392,7 @@ class ChatGPTAdapter(SiteAdapter):
                     ready_check=self._ready_check_textbox,
                     max_wait_s=min(60, timeout_s - elapsed - 5),
                 )
+            self._log(f"ask: assistant wait done ({time.time()-t1:.2f}s)")
 
             # 等待新消息的文本内容出现（确保不是旧消息）
             # 优化：如果 assistant_count 已经增加，可以快速跳过这个检查
@@ -1241,6 +1462,7 @@ class ChatGPTAdapter(SiteAdapter):
             
             if not new_message_found:
                 self._log("ask: warning: new message content not confirmed, but continuing...")
+            self._log(f"ask: content wait done ({time.time()-t2:.2f}s)")
 
             # 等待输出稳定
             self._log("ask: waiting output stabilize...")

@@ -177,38 +177,40 @@ class GeminiAdapter(SiteAdapter):
     async def _find_textbox(self) -> Optional[Locator]:
         """
         查找输入框（先清理弹窗，因为弹窗会遮挡输入框导致 is_visible=False）
-        优化：快速检查 contenteditable（最常见）
+        优化：并行检查所有选择器，大幅提升性能
         """
-        # 1. 先尝试清理弹窗
-        await self._dismiss_popups()
-
-        # 2. 快速检查 contenteditable（最常见，优先级最高）
-        try:
-            loc = self.page.locator('div[contenteditable="true"]').first
-            if await loc.is_visible(timeout=500):
-                self._log("_find_textbox: found via contenteditable (fast path)")
-                return loc
-        except Exception:
-            pass
-
-        # 3. 如果 contenteditable 没找到，遍历其他选择器
-        for sel in self.TEXTBOX_CSS:
-            # 跳过已经检查过的 contenteditable
-            if sel == 'div[contenteditable="true"]':
-                continue
+        # 1. 先尝试清理弹窗（但减少频率，只在必要时清理）
+        # 注意：这里不每次都清理，因为弹窗清理本身也需要时间
+        
+        # 2. 并行检查所有选择器（大幅提升性能）
+        async def try_selector(sel: str) -> Optional[tuple]:
+            """尝试单个选择器，返回 (Locator, selector) 或 None"""
             try:
                 loc = self.page.locator(sel).first
                 if await loc.is_visible(timeout=500):
-                    self._log(f"_find_textbox: found via {sel}")
-                    return loc
+                    return (loc, sel)
             except Exception:
-                continue
+                pass
+            return None
+        
+        # 并行尝试所有选择器，取第一个成功的结果
+        tasks = [try_selector(sel) for sel in self.TEXTBOX_CSS]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 找到第一个成功的结果
+        for result in results:
+            if result is not None and not isinstance(result, Exception):
+                loc, sel = result
+                self._log(f"_find_textbox: found via {sel} (parallel)")
+                return loc
+        
         return None
 
     async def ensure_ready(self) -> None:
-        """优化版：处理弹窗、登录检测、输入框定位"""
+        """优化版：处理弹窗、登录检测、输入框定位，并行检查提升性能"""
         self._log("ensure_ready: start")
-        await asyncio.sleep(0.5)
+        # 优化：减少初始等待时间，从 0.5 秒减少到 0.2 秒
+        await asyncio.sleep(0.2)
 
         # 检查是否在登录页
         if "accounts.google.com" in self.page.url:
@@ -222,7 +224,18 @@ class GeminiAdapter(SiteAdapter):
                 max_wait_s=120,
             )
 
-        # 尝试寻找输入框
+        # 优化：添加快速路径 - 如果页面已经加载完成，直接检查输入框
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=2000)
+            # 页面已加载，直接尝试查找输入框
+            tb = await self._find_textbox()
+            if tb:
+                self._log(f"ensure_ready: textbox found quickly (fast path)")
+                return
+        except Exception:
+            pass  # 快速路径失败，继续正常流程
+
+        # 尝试寻找输入框（优化：并行检查，减少等待时间）
         t0 = time.time()
         check_count = 0
         while time.time() - t0 < 30:  # 30秒等待
@@ -232,14 +245,16 @@ class GeminiAdapter(SiteAdapter):
                 return
 
             check_count += 1
-            # 没找到，可能是页面还没加载完，或者有顽固弹窗
-            if check_count % 3 == 0:  # 每3次尝试关闭一次弹窗
+            # 优化：减少弹窗清理频率，从每3次改为每5次，减少不必要的操作
+            if check_count % 5 == 0:  # 每5次尝试关闭一次弹窗
                 await self._dismiss_popups()
             
             if time.time() - t0 >= 5 and check_count % 5 == 0:
                 self._log(f"ensure_ready: still locating textbox... (attempt {check_count})")
             
-            await asyncio.sleep(0.5)
+            # 优化：前几次快速检查（0.2秒），之后逐渐增加间隔（0.5秒）
+            sleep_time = 0.2 if check_count < 5 else 0.5
+            await asyncio.sleep(sleep_time)
 
         # 兜底：人工介入
         await self.save_artifacts("gemini_ensure_ready_fail")
@@ -261,21 +276,49 @@ class GeminiAdapter(SiteAdapter):
             raise RuntimeError("ensure_ready: still cannot locate textbox after manual checkpoint.")
 
     async def new_chat(self) -> None:
-        """Gemini 的新聊天通常在侧边栏或直接访问 base_url"""
+        """Gemini 的新聊天通常在侧边栏或直接访问 base_url，优化：添加明确的等待条件"""
         try:
+            # 如果输入框可用，直接复用当前会话，避免 new_chat 开销
+            try:
+                tb = await self._find_textbox()
+                if tb:
+                    self._log("new_chat: textbox available, skip new_chat")
+                    return
+            except Exception:
+                pass
+            # 记录当前 URL，用于检测页面是否变化
+            current_url = self.page.url
+            
             # 尝试点击新聊天按钮
             for sel in self.NEW_CHAT:
                 try:
                     btn = self.page.locator(sel).first
                     if await btn.is_visible(timeout=1000):
                         await btn.click()
-                        await asyncio.sleep(1.0)
+                        # 优化：添加明确的等待条件，而不是固定 sleep
+                        # 等待输入框重新出现或页面 URL 变化
+                        t0 = time.time()
+                        while time.time() - t0 < 5.0:  # 最多等待5秒
+                            tb = await self._find_textbox()
+                            if tb:
+                                self._log(f"new_chat: textbox reappeared after {time.time()-t0:.2f}s")
+                                return
+                            # 检查 URL 是否变化
+                            if self.page.url != current_url:
+                                self._log(f"new_chat: URL changed after {time.time()-t0:.2f}s")
+                                await asyncio.sleep(0.5)  # 等待页面加载
+                                return
+                            await asyncio.sleep(0.2)
+                        # 如果5秒内没有检测到变化，使用较短的固定等待
+                        await asyncio.sleep(0.5)
                         return
                 except Exception:
                     continue
             # 备选：直接刷新页面通常就是新会话
             await self.page.goto(self.base_url)
-            await asyncio.sleep(1.0)
+            # 优化：等待页面加载完成，而不是固定 sleep
+            await self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+            await asyncio.sleep(0.5)  # 额外等待，确保输入框出现
         except Exception:
             pass
 
@@ -293,9 +336,13 @@ class GeminiAdapter(SiteAdapter):
     async def ask(self, prompt: str, timeout_s: int = 180) -> Tuple[str, str]:
         # 0. 清理 prompt 中的换行符（避免输入时触发 Enter）
         prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"ask: {msg}"))
-        
+
+        t_ready = time.time()
         await self.ensure_ready()
+        self._log(f"ask: ensure_ready done ({time.time()-t_ready:.2f}s)")
+        t_chat = time.time()
         await self.new_chat()
+        self._log(f"ask: new_chat done ({time.time()-t_chat:.2f}s)")
 
         # --- 1. 寻找输入框 ---
         tb = await self._find_textbox()
@@ -361,18 +408,35 @@ class GeminiAdapter(SiteAdapter):
                 
                 # 确保元素可见和可交互
                 await tb.wait_for(state="visible", timeout=15000)
-                import json
-                js_code = f"el => el.innerText = {json.dumps(prompt)}"
+                # 优化：增强 JS 注入，触发所有关键事件以确保 React/Angular 状态同步
+                js_code = """
+                (el, text) => {
+                    el.focus();
+                    try {
+                        document.execCommand('insertText', false, text);
+                    } catch (e) {}
+                    if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') {
+                        if (el.contentEditable === 'true') {
+                            el.innerText = text;
+                        } else {
+                            el.value = text;
+                        }
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
+                    el.dispatchEvent(new KeyboardEvent('keyup', { key: ' ' }));
+                    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace' }));
+                    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Backspace' }));
+                    el.blur();
+                    el.focus();
+                }
+                """
                 await asyncio.wait_for(
-                    tb.evaluate(js_code),
+                    tb.evaluate(js_code, prompt),
                     timeout=20.0  # 增加到 20 秒
                 )
-                # 必须触发 input 事件，否则发送按钮可能不亮
-                await asyncio.wait_for(
-                    tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
-                    timeout=10.0
-                )
-                self._log("ask: injected via JS + triggered input event")
+                self._log("ask: injected via JS + triggered input events (execCommand/keyboard)")
                 
                 # JS 注入后也检查是否已经发送
                 await asyncio.sleep(0.2)
@@ -401,18 +465,35 @@ class GeminiAdapter(SiteAdapter):
                 try:
                     # 确保元素可见和可交互
                     await tb.wait_for(state="visible", timeout=15000)
-                    import json
-                    js_code = f"el => el.innerText = {json.dumps(prompt)}"
+                    # 优化：增强 JS 注入，触发所有关键事件以确保 React/Angular 状态同步
+                    js_code = """
+                    (el, text) => {
+                        el.focus();
+                        try {
+                            document.execCommand('insertText', false, text);
+                        } catch (e) {}
+                        if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') {
+                            if (el.contentEditable === 'true') {
+                                el.innerText = text;
+                            } else {
+                                el.value = text;
+                            }
+                        }
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
+                        el.dispatchEvent(new KeyboardEvent('keyup', { key: ' ' }));
+                        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace' }));
+                        el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Backspace' }));
+                        el.blur();
+                        el.focus();
+                    }
+                    """
                     await asyncio.wait_for(
-                        tb.evaluate(js_code),
+                        tb.evaluate(js_code, prompt),
                         timeout=20.0  # 增加到 20 秒
                     )
-                    # 必须触发 input 事件，否则发送按钮可能不亮
-                    await asyncio.wait_for(
-                        tb.evaluate("el => el.dispatchEvent(new Event('input', {bubbles: true}))"),
-                        timeout=10.0
-                    )
-                    self._log("ask: injected via JS + triggered input event (fallback)")
+                    self._log("ask: injected via JS + triggered input events (fallback)")
                 except Exception as js_err:
                     self._log(f"ask: JS injection also failed: {js_err}")
                     raise  # 如果 JS 注入也失败，抛出异常
@@ -430,27 +511,72 @@ class GeminiAdapter(SiteAdapter):
             textbox_len_before_send = 0
         
         sent = False
+        t_send = time.time()
         for btn_sel in self.SEND_BTN:
             try:
                 btn = self.page.locator(btn_sel).first
+                # 优化：等待按钮可见且稳定（不是加载中状态）
                 if await btn.is_visible(timeout=5000):  # 增加到 5 秒
                     # 验证按钮确实是发送按钮，而不是停止按钮
                     try:
                         aria_label = await btn.get_attribute("aria-label") or ""
-                        # 如果 aria-label 包含"停止"或"Stop"，跳过这个按钮
-                        if "停止" in aria_label or "Stop" in aria_label:
-                            self._log(f"send: skipping button with aria-label='{aria_label}' (not a send button)")
-                            continue
+                        class_name = await btn.get_attribute("class") or ""
+                        if "停止" in aria_label or "stop" in aria_label.lower() or "stop" in class_name.lower():
+                            self._log(f"send: skipping stop button (aria-label='{aria_label}', class='{class_name}')")
+                            continue  # 跳过停止按钮，尝试下一个选择器
                     except Exception:
-                        pass  # 无法获取 aria-label，继续尝试点击
+                        pass  # 无法获取属性时，继续尝试点击
+                    
+                    # 优化：等待按钮进入可点击状态（不是 disabled）
+                    try:
+                        await btn.wait_for(state="visible", timeout=2000)
+                        # 检查按钮是否被禁用
+                        is_disabled = await btn.get_attribute("disabled") or await btn.get_attribute("aria-disabled")
+                        if is_disabled == "true" or is_disabled is True:
+                            self._log(f"send: button is disabled, waiting...")
+                            await asyncio.sleep(0.5)
+                            # 再次检查
+                            is_disabled = await btn.get_attribute("disabled") or await btn.get_attribute("aria-disabled")
+                            if is_disabled == "true" or is_disabled is True:
+                                self._log(f"send: button still disabled, trying next selector")
+                                continue
+                    except Exception:
+                        pass  # 检查失败不影响点击
+                    
+                    # 优化：添加 hover 操作，模拟真人点击前的准备，有助于唤醒前端监听
+                    try:
+                        await btn.hover(timeout=2000)
+                        await asyncio.sleep(0.1)  # 短暂等待，让 hover 效果生效
+                    except Exception:
+                        pass  # hover 失败不影响点击
+                    
+                    # 优化：在点击前检查按钮状态（disabled 说明可能正在发送）
+                    try:
+                        is_disabled = await btn.get_attribute("disabled")
+                        if is_disabled is not None:
+                            self._log(f"ask: send button is disabled, may already be sending")
+                    except Exception:
+                        pass
                     
                     await btn.click(timeout=10000)  # 增加到 10 秒
                     sent = True
                     self._log(f"ask: clicked send button {btn_sel}")
+                    
+                    # 优化：点击后立即检查按钮是否变为 disabled（说明已发送）
+                    try:
+                        await asyncio.sleep(0.2)  # 给按钮状态一点时间更新
+                        is_disabled_after = await btn.get_attribute("disabled")
+                        if is_disabled_after is not None:
+                            self._log(f"ask: send button became disabled after click, likely sent")
+                            sent_confirmed = True
+                    except Exception:
+                        pass
+                    
                     # 点击后等待一下，检查是否真的发送了
                     # 优化：使用多种方式检测，避免误报
-                    await asyncio.sleep(0.5)
-                    sent_confirmed = False
+                    if not sent_confirmed:
+                        await asyncio.sleep(0.5)
+                    sent_confirmed = sent_confirmed or False
                     
                     # 方法1: 检查输入框内容是否清空（快速但可能不准确）
                     textbox_len_after = textbox_len_before_send  # 初始化
@@ -581,40 +707,103 @@ class GeminiAdapter(SiteAdapter):
                         raise RuntimeError(f"ask: both Enter and Control+Enter failed. Enter_err={e}, CtrlEnter_err={e2}")
             
         # --- 6. 等待回复 (流式检测) ---
+        self._log(f"ask: send phase done ({time.time()-t_send:.2f}s)")
         self._log("ask: waiting for response...")
+        t_resp = time.time()
+        
+        # 优化：记录发送前的最后一个响应文本长度，用于确保检测新响应
+        try:
+            last_text_before_send = await self._last_text()
+            last_text_len_before_send = len(last_text_before_send.strip()) if last_text_before_send else 0
+        except Exception:
+            last_text_len_before_send = 0
         
         last_text = ""
         stable_iter = 0
         last_change_time = time.time()
         start_t = time.time()
         hb = start_t
+        # 优化：添加一个阈值，允许文本长度有微小变化（±5字符）仍认为是稳定的
+        LENGTH_TOLERANCE = 5
         
         while time.time() - start_t < timeout_s:
             # 获取最后一个回复的文本（使用现有的 _last_text 方法）
-            text = await self._last_text()
+            try:
+                text = await self._last_text()
+            except Exception as e:
+                # 优化：捕获异常，避免 Future exception was never retrieved
+                if "Timeout" in str(e) or "timeout" in str(e).lower():
+                    # 超时是正常的，继续等待
+                    await asyncio.sleep(0.3)
+                    continue
+                # 其他异常也继续等待，不中断流程
+                await asyncio.sleep(0.3)
+                continue
             
             if text and len(text) > 0:
-                if len(text) > len(last_text):
-                    # 还在生成
+                text_len = len(text)
+                last_text_len = len(last_text) if last_text else 0
+                len_diff = text_len - last_text_len
+                
+                # 优化：确保检测的是新响应，而不是旧响应
+                # 如果当前文本长度小于或等于发送前的长度，说明可能是旧响应，继续等待
+                if last_text_len_before_send > 0 and text_len <= last_text_len_before_send * 1.1:
+                    # 如果文本长度没有明显增加（<10%），可能是旧响应，继续等待
+                    if text_len < last_text_len_before_send:
+                        # 如果长度反而减少了，肯定是旧响应，重置状态
+                        last_text = text
+                        stable_iter = 0
+                        last_change_time = time.time()
+                        await asyncio.sleep(0.3)
+                        continue
+                    # 如果长度相近，可能是旧响应，但继续检测（可能是同一响应）
+                    pass
+                
+                if len_diff > LENGTH_TOLERANCE:
+                    # 还在生成（长度明显增加，超过容差）
                     last_text = text
                     stable_iter = 0
                     last_change_time = time.time()  # 更新最后变化时间
-                elif len(text) == len(last_text) and len(text) > 5:
-                    # 长度稳定
+                elif abs(len_diff) <= LENGTH_TOLERANCE and text_len > 5:
+                    # 长度稳定（变化在容差范围内）
+                    if last_text != text:
+                        # 文本内容有变化但长度相近，更新文本但保持稳定计数
+                        last_text = text
                     stable_iter += 1
                     # 优化：动态调整稳定次数（短响应3次，长响应5次）
                     # 优化：如果响应长度在1秒内没有变化，直接认为稳定（快速路径）
                     time_since_change = time.time() - last_change_time
                     if time_since_change >= 1.0 and stable_iter >= 2:
                         # 快速路径：1秒内没有变化且已稳定2次，直接认为完成
-                        self._log(f"ask: response stabilized (len={len(text)}, fast path: {time_since_change:.1f}s no change)")
+                        self._log(f"ask: response stabilized (len={text_len}, fast path: {time_since_change:.1f}s no change)")
+                        self._log(f"ask: response wait done ({time.time()-t_resp:.2f}s)")
                         return text, self.page.url
                     
                     # 根据响应长度动态调整稳定次数
-                    required_stable_iter = 3 if len(text) < 500 else 5
+                    required_stable_iter = 3 if text_len < 500 else 5
                     if stable_iter >= required_stable_iter:
-                        self._log(f"ask: response stabilized (len={len(text)}, stable_iter={stable_iter})")
+                        self._log(f"ask: response stabilized (len={text_len}, stable_iter={stable_iter})")
+                        self._log(f"ask: response wait done ({time.time()-t_resp:.2f}s)")
                         return text, self.page.url
+                elif len_diff < -LENGTH_TOLERANCE:
+                    # 长度明显减少（可能是页面刷新或内容被截断），重置状态
+                    last_text = text
+                    stable_iter = 0
+                    last_change_time = time.time()
+                else:
+                    # text_len == 0 或 text_len <= 5，继续等待
+                    pass
+            elif last_text and len(last_text) > 5:
+                # 如果之前有文本但现在获取不到，可能是页面刷新，但文本应该还在
+                # 继续使用 last_text，但增加稳定计数
+                stable_iter += 1
+                time_since_change = time.time() - last_change_time
+                required_stable_iter = 3 if len(last_text) < 500 else 5
+                if time_since_change >= 2.0 and stable_iter >= required_stable_iter:
+                    # 如果2秒内没有变化且已稳定足够次数，认为完成
+                    self._log(f"ask: response stabilized (len={len(last_text)}, stable_iter={stable_iter}, no new text)")
+                    self._log(f"ask: response wait done ({time.time()-t_resp:.2f}s)")
+                    return last_text, self.page.url
             
             if time.time() - hb >= 10:
                 self._log(f"ask: waiting... (elapsed={time.time()-start_t:.1f}s, stable_iter={stable_iter}, last_len={len(last_text)})")

@@ -212,6 +212,14 @@ class DriverServer:
                 if site_id not in self._sites:
                     await self._write_json(writer, 400, {"ok": False, "error": f"unknown site_id: {site_id}"})
                     return
+                try:
+                    plen = len(prompt) if isinstance(prompt, str) else -1
+                    print(
+                        f"[{beijing_now_iso()}] [driver] run_task recv | site={site_id} | prompt_len={plen} | timeout_s={timeout_s}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
 
                 # 确保 site 常驻 adapter 已启动，并站点内串行
                 rt = self._sites[site_id]

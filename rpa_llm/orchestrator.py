@@ -145,6 +145,12 @@ async def run_site_worker(
                 flush=True,
             )
 
+            # 优化：错峰启动机制，避免多个浏览器窗口同时抢 CPU 导致资源死锁
+            # 第一个任务立即启动，后续任务错峰 3 秒（让前一个页面的 heavy JS 加载完）
+            if idx > 1:
+                await asyncio.sleep(3.0)
+                print(f"[{beijing_now_iso()}] [{site_id}] staggered start delay (3s) for task {idx}", flush=True)
+
             try:
                 payload = await asyncio.to_thread(driver_run_task, driver_url, site_id, t.prompt, task_timeout_s)
                 ok = bool(payload.get("ok"))
@@ -504,21 +510,33 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
 
     max_parallel_sites = int(brief.output.get("max_parallel_sites", 2))
     sem = asyncio.Semaphore(max_parallel_sites)
+    # 优化：默认错峰启动 5 秒，避免多个浏览器窗口同时抢 CPU 导致资源死锁
+    # 虽然看起来慢了 5 秒，但能避免 60 秒的资源争抢卡顿
+    stagger_start_s = float(brief.output.get("stagger_start_s", 5) or 5)
 
     coros = []
-    for site_id, ts in site_map.items():
+    async def _run_with_delay(delay_s: float, coro):
+        if delay_s > 0:
+            await asyncio.sleep(delay_s)
+        return await coro
+
+    for idx, (site_id, ts) in enumerate(site_map.items()):
+        delay_s = max(0.0, stagger_start_s * idx)
         coros.append(
-            run_site_worker(
-                site_id=site_id,
-                tasks=ts,
-                vault_paths=vault_paths,
-                profiles_root=profiles_root,
-                artifacts_root=artifacts_root,
-                tags=tags,
-                headless=headless,
-                sem=sem,
-                driver_url=driver_url,
-                task_timeout_s=task_timeout_s,
+            _run_with_delay(
+                delay_s,
+                run_site_worker(
+                    site_id=site_id,
+                    tasks=ts,
+                    vault_paths=vault_paths,
+                    profiles_root=profiles_root,
+                    artifacts_root=artifacts_root,
+                    tags=tags,
+                    headless=headless,
+                    sem=sem,
+                    driver_url=driver_url,
+                    task_timeout_s=task_timeout_s,
+                ),
             )
         )
 

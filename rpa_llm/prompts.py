@@ -407,7 +407,7 @@ def build_dual_model_arbitration_prompt(
 
         {right_block}
 
-       将以上内容使用obsidian markdown格式输出，将内容放到\`\`\`text\`\`\`，确保全文输出。
+       将以上内容使用obsidian markdown格式输出，将内容放到```text```，确保全文输出。
 
         """
     )
