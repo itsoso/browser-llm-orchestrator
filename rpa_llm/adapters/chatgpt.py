@@ -1501,6 +1501,8 @@ class ChatGPTAdapter(SiteAdapter):
             last_text = ""
             last_change = time.time()
             hb = time.time()
+            # 优化：用于检测文本是否在增长（局部变量，避免实例属性污染）
+            last_text_len_history = []
 
             while time.time() - ask_start_time < timeout_s:
                 elapsed = time.time() - ask_start_time
@@ -1543,14 +1545,12 @@ class ChatGPTAdapter(SiteAdapter):
                         # 如果文本长度在增加，强制认为 generating=True
                         if last_text_len > 0:
                             # 检查文本是否在增长（通过比较当前长度和历史长度）
-                            if not hasattr(self, '_last_text_len_history'):
-                                self._last_text_len_history = []
-                            self._last_text_len_history.append((time.time(), last_text_len))
+                            last_text_len_history.append((time.time(), last_text_len))
                             # 只保留最近 3 次记录
-                            self._last_text_len_history = self._last_text_len_history[-3:]
+                            last_text_len_history[:] = last_text_len_history[-3:]
                             # 如果最近 2 次记录显示长度在增加，认为正在生成
-                            if len(self._last_text_len_history) >= 2:
-                                prev_len = self._last_text_len_history[-2][1]
+                            if len(last_text_len_history) >= 2:
+                                prev_len = last_text_len_history[-2][1]
                                 if last_text_len > prev_len:
                                     generating = True
                                     self._log(f"ask: text growing ({prev_len}->{last_text_len}), forcing generating=True")

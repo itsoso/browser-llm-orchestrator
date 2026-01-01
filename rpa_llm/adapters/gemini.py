@@ -272,24 +272,75 @@ class GeminiAdapter(SiteAdapter):
                 return ""
 
     async def _tb_clear(self, tb: Locator) -> None:
-        # Prefer user-like clear: select-all then backspace
+        # 修复：增强清空逻辑，确保完全清空，并验证清空结果
+        # 方法1：用户式清空（Control+A + Backspace）
         try:
             await tb.focus(timeout=2000)
             try:
                 await self.page.keyboard.press("Control+A")
             except Exception:
-                await self.page.keyboard.press("Meta+A")
+                try:
+                    await self.page.keyboard.press("Meta+A")
+                except Exception:
+                    pass
             await self.page.keyboard.press("Backspace")
-            return
+            await asyncio.sleep(0.1)  # 等待清空完成
+            
+            # 验证清空结果
+            text_after = await self._tb_get_text(tb)
+            if not text_after.strip():
+                return  # 清空成功
         except Exception:
             pass
 
-        # JS fallback (do not touch innerHTML)
+        # 方法2：JS 清空（更彻底）
         try:
             await tb.evaluate(
                 """(el) => {
                     el.innerText = '';
+                    el.textContent = '';
+                    // 对于 Quill 编辑器，还需要清空内部结构
+                    if (el.querySelector && el.querySelector('.ql-editor')) {
+                        const qlEditor = el.querySelector('.ql-editor');
+                        if (qlEditor) {
+                            qlEditor.innerText = '';
+                            qlEditor.textContent = '';
+                        }
+                    }
                     el.dispatchEvent(new Event('input', {bubbles:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                }"""
+            )
+            await asyncio.sleep(0.1)  # 等待清空完成
+            
+            # 再次验证清空结果
+            text_after = await self._tb_get_text(tb)
+            if not text_after.strip():
+                return  # 清空成功
+        except Exception:
+            pass
+
+        # 方法3：强制清空（如果前两种方法都失败）
+        try:
+            await tb.evaluate(
+                """(el) => {
+                    // 清空所有可能的文本内容
+                    if (el.innerText !== undefined) el.innerText = '';
+                    if (el.textContent !== undefined) el.textContent = '';
+                    // 清空 Quill 编辑器
+                    const qlEditor = el.querySelector('.ql-editor');
+                    if (qlEditor) {
+                        qlEditor.innerText = '';
+                        qlEditor.textContent = '';
+                    }
+                    // 清空所有子元素
+                    const children = el.querySelectorAll('*');
+                    children.forEach(child => {
+                        if (child.innerText !== undefined) child.innerText = '';
+                        if (child.textContent !== undefined) child.textContent = '';
+                    });
+                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
                 }"""
             )
         except Exception:
@@ -300,28 +351,66 @@ class GeminiAdapter(SiteAdapter):
         # 对于 contenteditable，直接使用 JS 注入，而不是 type()
         await tb.focus(timeout=4000)
 
-        # 检测元素类型
+        # 检测元素类型（修复：更可靠的检测方式）
+        is_contenteditable = False
+        tag_name = ""
         try:
             tag_name = await tb.evaluate("(el) => el.tagName?.toLowerCase() || ''")
-            is_contenteditable = await tb.evaluate("(el) => el.contentEditable === 'true'")
+            is_contenteditable = await tb.evaluate("(el) => el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true'")
+            # 额外检查：如果元素有 Quill 编辑器特征，也认为是 contenteditable
+            has_ql_editor = await tb.evaluate("(el) => el.classList?.contains('ql-editor') || el.querySelector?.('.ql-editor') !== null")
+            if has_ql_editor:
+                is_contenteditable = True
         except Exception:
-            tag_name = ""
-            is_contenteditable = False
+            # 检测失败，默认认为是 contenteditable（Gemini 通常使用 contenteditable）
+            is_contenteditable = True
 
         # 对于 contenteditable 元素，直接使用 JS 注入（更快更可靠）
         # 对于 textarea，可以使用 type() 或 fill()
         if is_contenteditable or tag_name != "textarea":
             # contenteditable：使用 JS 注入（与 base.py 保持一致）
+            # 修复：增强 JS 注入，确保 Quill 编辑器也能正确处理
             js_code = """
             (el, t) => {
                 el.focus();
+                // 对于 Quill 编辑器，需要找到实际的编辑器元素
+                let targetEl = el;
+                if (el.querySelector && el.querySelector('.ql-editor')) {
+                    targetEl = el.querySelector('.ql-editor');
+                }
+                // 先清空（确保没有残留内容）
+                targetEl.innerText = '';
+                targetEl.textContent = '';
+                // 尝试使用 execCommand（更接近真实输入）
                 const ok = document.execCommand && document.execCommand('insertText', false, t);
-                if (!ok) el.innerText = t;
+                if (!ok) {
+                    // fallback：直接设置文本
+                    targetEl.innerText = t;
+                    targetEl.textContent = t;
+                }
+                // 触发事件
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
+                // 对于 Quill，还需要触发其他事件
+                if (targetEl !== el) {
+                    targetEl.dispatchEvent(new Event('input', { bubbles: true }));
+                }
             }
             """
-            await tb.evaluate(js_code, text)
+            try:
+                await tb.evaluate(js_code, text)
+            except Exception as e:
+                self._log(f"ask: JS injection failed: {e}, trying fallback...")
+                # Fallback：直接设置 innerText
+                try:
+                    await tb.evaluate("""(el, t) => {
+                        el.innerText = t;
+                        el.textContent = t;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                    }""", text)
+                except Exception:
+                    raise RuntimeError(f"Failed to set text via JS injection: {e}")
+            
             # Nudge to trigger state updates (some UIs unlock send button only after key events)
             try:
                 await self.page.keyboard.type(" ")
@@ -331,13 +420,15 @@ class GeminiAdapter(SiteAdapter):
             return
 
         # textarea：对于短 prompt 使用 type()，长 prompt 使用 fill()
+        # 修复：即使检测为 textarea，如果内容很长，也使用 fill() 避免超时
         if len(text) < self.JS_INJECT_THRESHOLD:
             # Type quickly; keep timeout bounded.
             timeout_ms = max(15000, len(text) * 20)
             try:
                 await tb.type(text, delay=0, timeout=timeout_ms)
-            except Exception:
+            except Exception as type_err:
                 # type() 失败，fallback 到 fill()
+                self._log(f"ask: type() failed ({type_err}), using fill() as fallback...")
                 await tb.fill(text)
         else:
             # 长 prompt 直接使用 fill()
@@ -713,14 +804,35 @@ class GeminiAdapter(SiteAdapter):
         except Exception:
             pass
 
+        # 修复：确保输入框完全清空后再设置文本
         await self._tb_clear(tb)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.15)  # 增加等待时间，确保清空完成
+        
+        # 验证清空结果，如果还有残留内容，再次清空
+        check_text = await self._tb_get_text(tb)
+        if check_text.strip():
+            self._log(f"ask: warning - textbox still has content after clear (len={len(check_text)}), clearing again...")
+            await self._tb_clear(tb)
+            await asyncio.sleep(0.15)
+            # 再次验证
+            check_text2 = await self._tb_get_text(tb)
+            if check_text2.strip():
+                self._log(f"ask: warning - textbox still has content after second clear (len={len(check_text2)}), proceeding anyway...")
+        
         await self._tb_set_text(tb, prompt)
         await asyncio.sleep(0.15)
 
         before_text = (await self._tb_get_text(tb)).strip()
         before_len = len(before_text)
         self._log(f"send: textbox content before send (len={before_len})")
+        
+        # 修复：验证输入内容是否正确，如果长度不匹配，记录警告
+        expected_len = len(prompt)
+        if before_len != expected_len:
+            len_diff = abs(before_len - expected_len)
+            len_ratio = min(before_len, expected_len) / max(before_len, expected_len) if max(before_len, expected_len) > 0 else 0
+            if len_ratio < 0.9:  # 长度差异超过 10%
+                self._log(f"ask: warning - textbox content length mismatch (expected={expected_len}, actual={before_len}, diff={len_diff})")
 
         # Trigger send (bounded). On failure, manual checkpoint with real ready_check.
         t_send = time.time()
