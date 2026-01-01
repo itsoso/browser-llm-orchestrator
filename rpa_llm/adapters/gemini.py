@@ -45,12 +45,13 @@ class GeminiAdapter(SiteAdapter):
     ]
 
     # 发送按钮：Gemini 的发送按钮通常带 aria-label
+    # ⚠️ 注意：需要排除"停止回答"按钮（也有 send-button 类）
     SEND_BTN = [
-        'button[aria-label*="Send"]',
-        'button[aria-label*="发送"]',
-        'button.send-button',
-        'button:has-text("Send")',
-        'button:has-text("发送")',
+        'button[aria-label*="Send"]:not([aria-label*="停止"]):not([aria-label*="Stop"])',
+        'button[aria-label*="发送"]:not([aria-label*="停止"])',
+        'button.send-button:not([aria-label*="停止"]):not([aria-label*="Stop"]):not(.stop)',
+        'button:has-text("Send"):not(:has-text("Stop"))',
+        'button:has-text("发送"):not(:has-text("停止"))',
         'button > span.send-icon',  # 某些版本的图标结构
     ]
 
@@ -433,6 +434,16 @@ class GeminiAdapter(SiteAdapter):
             try:
                 btn = self.page.locator(btn_sel).first
                 if await btn.is_visible(timeout=5000):  # 增加到 5 秒
+                    # 验证按钮确实是发送按钮，而不是停止按钮
+                    try:
+                        aria_label = await btn.get_attribute("aria-label") or ""
+                        # 如果 aria-label 包含"停止"或"Stop"，跳过这个按钮
+                        if "停止" in aria_label or "Stop" in aria_label:
+                            self._log(f"send: skipping button with aria-label='{aria_label}' (not a send button)")
+                            continue
+                    except Exception:
+                        pass  # 无法获取 aria-label，继续尝试点击
+                    
                     await btn.click(timeout=10000)  # 增加到 10 秒
                     sent = True
                     self._log(f"ask: clicked send button {btn_sel}")
