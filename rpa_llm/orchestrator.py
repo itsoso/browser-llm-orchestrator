@@ -263,7 +263,10 @@ async def run_site_worker(
                 )
 
                 try:
-                    answer, url = await adapter.ask(t.prompt)
+                    try:
+                        answer, url = await adapter.ask(t.prompt, timeout_s=task_timeout_s)
+                    except TypeError:
+                        answer, url = await adapter.ask(t.prompt)
                     ok = True
                     err = None
                 except Exception as e:

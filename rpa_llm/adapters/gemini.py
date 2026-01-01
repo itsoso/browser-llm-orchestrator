@@ -459,11 +459,11 @@ class GeminiAdapter(SiteAdapter):
                         self._log("send: cannot read textbox after click, assuming sent")
                         sent_confirmed = True
                     
-                    # 方法2: 先进行快速响应检测（1秒），如果成功就不输出警告
+                    # 方法2: 先进行快速响应检测（0.8秒），如果成功就不输出警告
                     if not sent_confirmed:
                         try:
-                            # 优化：先快速检查一次（1秒），如果检测到响应就不输出警告
-                            await asyncio.sleep(1.0)
+                            # 优化：先快速检查一次（0.8秒），如果检测到响应就不输出警告
+                            await asyncio.sleep(0.8)
                             assistant_text_quick = await self._last_assistant_text()
                             assistant_len_quick = len(assistant_text_quick.strip()) if assistant_text_quick else 0
                             
@@ -477,19 +477,19 @@ class GeminiAdapter(SiteAdapter):
                     # 方法3: 等待更长时间，检查是否有响应开始（更可靠）
                     if not sent_confirmed:
                         try:
-                            # 优化：由于已经等待了1秒，这里再等待2秒即可（总共3秒）
-                            await asyncio.sleep(2.0)
+                            # 优化：由于已经等待了0.8秒，这里再等待1.5秒即可（总共2.3秒）
+                            await asyncio.sleep(1.5)
                             # 优化：记录发送前的 assistant 文本，用于比较
                             assistant_text_before_send = await self._last_assistant_text()
                             assistant_len_before_send = len(assistant_text_before_send.strip()) if assistant_text_before_send else 0
                             
                             # 等待后再检查（检查响应是否在增长）
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.4)
                             assistant_text_after_1 = await self._last_assistant_text()
                             assistant_len_after_1 = len(assistant_text_after_1.strip()) if assistant_text_after_1 else 0
                             
                             # 再等待一次，检查响应是否在增长
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.4)
                             assistant_text_after_2 = await self._last_assistant_text()
                             assistant_len_after_2 = len(assistant_text_after_2.strip()) if assistant_text_after_2 else 0
                             
@@ -574,6 +574,7 @@ class GeminiAdapter(SiteAdapter):
         
         last_text = ""
         stable_iter = 0
+        last_change_time = time.time()
         start_t = time.time()
         hb = start_t
         
@@ -586,19 +587,30 @@ class GeminiAdapter(SiteAdapter):
                     # 还在生成
                     last_text = text
                     stable_iter = 0
+                    last_change_time = time.time()  # 更新最后变化时间
                 elif len(text) == len(last_text) and len(text) > 5:
                     # 长度稳定
                     stable_iter += 1
-                    # 连续 5 次轮询 (约 2.5s) 长度不变，视为完成
-                    if stable_iter > 5:
-                        self._log(f"ask: response stabilized (len={len(text)})")
+                    # 优化：动态调整稳定次数（短响应3次，长响应5次）
+                    # 优化：如果响应长度在1秒内没有变化，直接认为稳定（快速路径）
+                    time_since_change = time.time() - last_change_time
+                    if time_since_change >= 1.0 and stable_iter >= 2:
+                        # 快速路径：1秒内没有变化且已稳定2次，直接认为完成
+                        self._log(f"ask: response stabilized (len={len(text)}, fast path: {time_since_change:.1f}s no change)")
+                        return text, self.page.url
+                    
+                    # 根据响应长度动态调整稳定次数
+                    required_stable_iter = 3 if len(text) < 500 else 5
+                    if stable_iter >= required_stable_iter:
+                        self._log(f"ask: response stabilized (len={len(text)}, stable_iter={stable_iter})")
                         return text, self.page.url
             
             if time.time() - hb >= 10:
                 self._log(f"ask: waiting... (elapsed={time.time()-start_t:.1f}s, stable_iter={stable_iter}, last_len={len(last_text)})")
                 hb = time.time()
             
-            await asyncio.sleep(0.5)
+            # 优化：减少检测间隔，从0.5秒减少到0.3秒，加快检测速度
+            await asyncio.sleep(0.3)
             
         await self.save_artifacts("gemini_answer_timeout")
         raise TimeoutError(f"Gemini response timeout. last_len={len(last_text)}")

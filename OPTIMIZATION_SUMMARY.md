@@ -1,172 +1,318 @@
-# 日志分析与优化建议总结
+# 性能优化总结
 
-## 日志分析发现的主要问题
+基于日志分析，本次优化主要针对以下问题：
 
-### 1. **ChatGPT `user_count()` 频繁超时** ⚠️ 已优化
-**问题描述：**
-- 日志显示大量 `ask: user_count() timeout, retrying...`
-- 发生在确认用户消息出现时，虽然最终能检测到，但等待时间过长（最多45秒）
+## 1. ChatGPT user_count() 检测慢（关键修复）
 
-**根本原因：**
-- `_user_count()` 方法没有超时保护，直接调用 `page.locator(sel).count()`
-- 在 `ask()` 中使用 `asyncio.wait_for(..., timeout=2.0)` 包装，但页面可能还在加载
+**问题**：
+- 日志显示 `user_count() timeout, retrying...` 反复出现
+- 从发送到确认用户消息出现用了 40+ 秒
+- 快速检查 `assistant_count` 成功后，代码逻辑有 bug，仍然进入慢速检测循环
 
-**优化方案：**
-- ✅ 在 `_user_count()` 内部添加 5 秒超时保护
-- ✅ 移除 `ask()` 中的额外超时包装（因为内部已有超时）
-- ✅ 改进错误处理，区分超时和其他异常
+**修复**：
+- 修复了快速检查成功后的逻辑 bug：如果 `assistant_count` 增加，直接标记为已确认，跳过后续等待
+- 将 `user_wait_timeout` 从 30 秒减少到 20 秒
+- 将重试间隔从 0.2 秒减少到 0.15 秒
+- 优化了代码结构，使用 `user_confirmed` 标志位，避免重复的 try-except 嵌套
 
-**代码变更：**
-```python
-async def _user_count(self) -> int:
-    """获取用户消息数量，带超时保护。"""
-    for sel in self.USER_MSG:
-        try:
-            return await asyncio.wait_for(
-                self.page.locator(sel).count(),
-                timeout=5.0  # 5秒超时
-            )
-        except asyncio.TimeoutError:
-            continue  # 尝试下一个选择器
-        except Exception:
-            continue
-    return 0
+**预期效果**：
+- 用户消息确认时间从 40+ 秒减少到 1-5 秒（快速路径）
+- 正常路径从 20-30 秒减少到 10-20 秒
+
+## 2. ChatGPT 等待新消息内容慢
+
+**问题**：
+- 日志显示 `waiting for new message content` 用了 32+ 秒
+- 超时时间设置过长
+
+**修复**：
+- 如果 `assistant_count` 已增加，`content_wait_timeout` 从 5 秒减少到 3 秒
+- 如果 `assistant_count` 未增加，`content_wait_timeout` 从 10 秒减少到 8 秒
+- 快速检查超时从 1.0 秒减少到 0.8 秒
+- 正常检查超时从 1.5 秒减少到 1.2 秒
+- 等待间隔从 0.3 秒减少到 0.2 秒
+- 添加了更宽松的长度增长检测（>20%）
+
+**预期效果**：
+- 新消息内容检测时间从 32+ 秒减少到 1-5 秒（快速路径）
+- 正常路径从 10-15 秒减少到 3-8 秒
+
+## 3. Gemini send 警告优化
+
+**问题**：
+- 日志显示 `send: warning - textbox still has content after button click` 频繁出现
+- 但实际上响应都正常返回，说明这些警告是误报
+
+**修复**：
+- 快速响应检测从 1.0 秒减少到 0.8 秒
+- 主响应检测从 2.0 秒减少到 1.5 秒（总时间从 3.0 秒减少到 2.3 秒）
+- 检查间隔从 0.5 秒减少到 0.4 秒
+- 保持了多层检测机制（输入框清空、快速响应、响应增长）
+
+**预期效果**：
+- 发送确认时间从 3.0 秒减少到 2.3 秒
+- 误报警告减少，但保持必要的警告机制
+
+## 优化效果总结
+
+### 性能提升
+1. **ChatGPT 用户消息确认**：从 40+ 秒 → 1-5 秒（快速路径）或 10-20 秒（正常路径）
+2. **ChatGPT 新消息内容检测**：从 32+ 秒 → 1-5 秒（快速路径）或 3-8 秒（正常路径）
+3. **Gemini 发送确认**：从 3.0 秒 → 2.3 秒
+
+### 总体预期
+- **ChatGPT 单次 ask 时间**：从 1.5-2.5 分钟 → 1.0-1.5 分钟（减少 30-40%）
+- **Gemini 单次 ask 时间**：从 1.9 分钟 → 1.7 分钟（减少 10%）
+- **整体流程时间**：从 2.5 分钟 → 1.8-2.0 分钟（减少 20-30%）
+
+### 代码质量
+- 修复了关键逻辑 bug（快速检查成功后的跳过逻辑）
+- 优化了代码结构，减少重复代码
+- 保持了错误处理和容错机制
+
+## 后续优化建议（基于最新日志分析）
+
+### 1. ChatGPT `_user_count()` 和 `_assistant_count()` 优化（高优先级）
+
+**问题**（基于最新日志）：
+- 日志显示 `user_count() timeout, retrying...` 仍然频繁出现（例如：23:47:47 到 23:48:13，用了 26 秒）
+- `_user_count()` 对每个选择器都有 8 秒超时，如果第一个选择器失败，会浪费 8 秒
+- `_assistant_count()` 没有超时保护，如果第一个选择器失败，会等待很长时间
+- 多个选择器串行尝试，效率低
+- 日志显示：`ask: user_count() timeout, retrying...` 反复出现，每次间隔约 2-3 秒
+
+**具体日志证据**：
+```
+[2025-12-31T23:47:47+08:00] [chatgpt] ask: user_count() timeout, retrying...
+[2025-12-31T23:47:50+08:00] [chatgpt] ask: user_count() timeout, retrying...
+[2025-12-31T23:47:52+08:00] [chatgpt] ask: user_count() timeout, retrying...
+...（重复多次）...
+[2025-12-31T23:48:13+08:00] [chatgpt] ask: user_count(after)=2 (sent OK)
 ```
 
----
+**建议**：
+- **并行尝试多个选择器**：使用 `asyncio.gather()` 同时尝试所有选择器，取第一个成功的结果
+- **减少单个选择器超时**：从 8 秒减少到 3-5 秒
+- **添加总超时保护**：整个方法最多等待 5 秒
+- **优化重试逻辑**：如果快速检查 `assistant_count` 成功，直接跳过 `user_count` 检测
 
-### 2. **Gemini 发送检测误报** ⚠️ 已优化
-**问题描述：**
-- 多次出现 `send: warning - textbox still has content after button click (len=XXX), may not have sent`
-- 但实际上消息已经发送（后续有响应）
+**预期效果**：
+- `_user_count()` 和 `_assistant_count()` 调用时间从 8 秒减少到 1-3 秒
+- 减少 `user_count() timeout, retrying...` 的出现频率
+- 用户消息确认时间从 26 秒减少到 3-5 秒
 
-**根本原因：**
-- 仅依赖输入框内容清空来判断是否发送
-- Gemini 可能不会立即清空输入框，导致误报
+### 2. ChatGPT `assistant_wait_timeout` 优化（高优先级）
 
-**优化方案：**
-- ✅ 降低输入框清空检测的阈值（从 50% 降到 30%）
-- ✅ 添加部分清空检测（30%-70% 之间也认为已发送）
-- ✅ 添加响应检测作为辅助判断（等待1秒后检查是否有新响应）
-- ✅ 如果无法读取输入框，假设已发送（可能是页面正在刷新）
+**问题**（基于最新日志）：
+- 当前 `assistant_wait_timeout` 最多 180 秒，可能过长
+- 日志显示实际等待时间通常远小于 180 秒
+- 但 `waiting for new message content` 仍然用了很长时间（例如：00:09:44 到 00:10:16，用了 32 秒）
 
-**代码变更：**
-```python
-# 方法1: 检查输入框内容（降低阈值）
-if textbox_len_after < textbox_len_before_send * 0.3:  # 从 0.5 降到 0.3
-    sent_confirmed = True
-elif textbox_len_after < textbox_len_before_send * 0.7:
-    # 部分清空也认为已发送
-    sent_confirmed = True
-
-# 方法2: 检查响应是否开始（更可靠）
-await asyncio.sleep(1.0)
-assistant_text = await self._last_assistant_text()
-if assistant_text and len(assistant_text.strip()) > 10:
-    sent_confirmed = True
+**具体日志证据**：
+```
+[2026-01-01T00:09:44+08:00] [chatgpt] ask: waiting for new message content (different from before)...
+[2026-01-01T00:09:50+08:00] [chatgpt] ask: still waiting for new message content... (elapsed=46.6s/480s)
+[2026-01-01T00:09:57+08:00] [chatgpt] ask: still waiting for new message content... (elapsed=53.9s/480s)
+[2026-01-01T00:10:03+08:00] [chatgpt] ask: still waiting for new message content... (elapsed=59.1s/480s)
+[2026-01-01T00:10:16+08:00] [chatgpt] ask: warning: new message content not confirmed, but continuing...
 ```
 
----
+**建议**：
+- 将 `assistant_wait_timeout` 从 180 秒减少到 120 秒
+- 如果 `assistant_count` 已经增加，可以进一步减少到 60 秒
+- 优化 `content_wait_timeout` 逻辑：如果 `assistant_count` 已增加，减少到 3 秒；否则减少到 8 秒（已实施）
+- 添加更快的检测机制：如果 `assistant_count` 已增加，直接检查文本内容，不需要等待
 
-### 3. **ChatGPT 清理失败错误日志不完整** ⚠️ 已优化
-**问题描述：**
-- 日志显示 `send: JS clear failed:` （错误信息为空）
-- 无法诊断问题原因
+**预期效果**：
+- 减少不必要的等待时间
+- 如果 assistant 消息确实没有出现，更快地触发手动检查点
+- 新消息内容检测时间从 32+ 秒减少到 3-8 秒
 
-**优化方案：**
-- ✅ 记录详细的错误信息，包括异常类型和消息
-- ✅ 即使异常消息为空，也记录异常类型
+### 3. Gemini 响应稳定检测优化（高优先级）
 
-**代码变更：**
-```python
-except Exception as e:
-    error_msg = f"{type(e).__name__}: {str(e)}" if str(e) else f"{type(e).__name__} (no message)"
-    self._log(f"send: JS clear failed: {error_msg}")
+**问题**（基于最新日志）：
+- 当前稳定检测间隔是 0.5 秒，需要连续 5 次不变（约 2.5 秒）
+- 对于短响应，这个时间可能过长
+- 日志显示某些响应等待时间很长（例如：`waiting... (elapsed=99.6s, stable_iter=0, last_len=1042)`）
+
+**具体日志证据**：
+```
+[2026-01-01T00:11:10+08:00] [gemini] ask: waiting... (elapsed=99.6s, stable_iter=0, last_len=1042)
+[2026-01-01T00:11:13+08:00] [gemini] ask: response stabilized (len=1042)
 ```
 
----
+**建议**：
+- 减少检测间隔：从 0.5 秒减少到 0.3 秒
+- 动态调整稳定次数：根据响应长度调整（短响应 3 次，长响应 5 次）
+- 添加快速路径：如果响应长度在 1 秒内没有变化，直接认为稳定
+- 优化稳定检测逻辑：如果响应长度在连续 2 次检查中都没有变化（且 `stable_iter >= 3`），可以提前认为稳定
 
-### 4. **TargetClosedError 未处理** ⚠️ 已优化
-**问题描述：**
-- 日志中出现 `TargetClosedError: Target page, context or browser has been closed`
-- 发生在 `type()` 输入过程中，导致任务失败
+**预期效果**：
+- 短响应（<500 字符）的检测时间从 2.5 秒减少到 1-1.5 秒
+- 长响应的检测时间保持稳定
+- 极端情况（99 秒）应该不会出现，如果出现说明检测逻辑有问题
 
-**优化方案：**
-- ✅ 导入 `PlaywrightError` 类型
-- ✅ 在 `type()` 调用时捕获 `PlaywrightError`
-- ✅ 检测 `TargetClosedError` 并转换为更友好的错误消息
+### 4. ChatGPT 输出稳定检测优化
 
-**代码变更：**
-```python
-from playwright.async_api import Frame, Locator, Error as PlaywrightError
+**问题**：
+- 当前 `stable_seconds = 2.0` 秒，可能过长
+- 检查间隔是 0.6 秒（在 `assistant_wait_timeout` 循环中）
 
-try:
-    await tb.type(prompt, delay=0, timeout=timeout_ms)
-except PlaywrightError as pe:
-    if "TargetClosed" in str(pe) or "Target page" in str(pe):
-        raise RuntimeError(f"Browser/page closed during input: {pe}") from pe
-    raise
-```
+**建议**：
+- 减少 `stable_seconds`：从 2.0 秒减少到 1.5 秒
+- 减少检查间隔：从 0.6 秒减少到 0.4 秒
+- 添加快速路径：如果 `generating=False` 且文本长度在 0.5 秒内没有变化，直接认为稳定
 
----
+**预期效果**：
+- 输出稳定检测时间从 2-3 秒减少到 1-2 秒
 
-## 其他观察与建议
+### 5. 并行优化（高级）
 
-### 5. **ensure_ready 耗时过长** 💡 建议优化
-**问题描述：**
-- ChatGPT 第一次尝试耗时 33 秒才找到输入框
-- 多次 `ensure_ready: still locating textbox...` 重试
+**问题**：
+- 多个 DOM 查询操作串行执行，效率低
+- 某些检测可以并行进行
 
-**建议：**
-- 考虑优化 `_find_textbox_any_frame()` 的搜索策略
-- 增加更快的选择器优先级
-- 考虑缓存输入框位置（如果页面结构稳定）
+**建议**：
+- **并行尝试多个选择器**：使用 `asyncio.gather()` 同时尝试所有选择器
+- **并行检测多个状态**：同时检测 `user_count`、`assistant_count`、`is_generating` 等
+- **使用 Playwright 的 `locator.first` 和 `locator.count()` 并行查询**
 
-### 6. **预热阶段的手动检查点** 💡 建议优化
-**问题描述：**
-- Gemini 和 ChatGPT 在预热阶段都需要手动检查点
-- 说明页面加载或登录状态可能不稳定
+**预期效果**：
+- DOM 查询时间减少 30-50%
+- 整体响应时间减少 5-10%
 
-**建议：**
-- 检查 `base_url` 是否正确
-- 考虑增加更长的等待时间
-- 检查是否需要登录或处理 Cloudflare
+### 6. 缓存优化
 
-### 7. **并发性能** 💡 建议优化
-**问题描述：**
-- ChatGPT 和 Gemini 同时运行时，ChatGPT 的 `user_count()` 超时更频繁
-- 可能是资源竞争导致
+**问题**：
+- 某些 DOM 查询结果可以缓存，避免重复查询
+- 例如 `_assistant_count()` 和 `_user_count()` 的结果可以缓存一段时间
 
-**建议：**
-- 考虑增加重试间隔
-- 检查浏览器资源使用情况
-- 考虑错峰执行（如果不需要严格并发）
+**建议**：
+- 添加短期缓存（1-2 秒）用于频繁调用的方法
+- 使用 `functools.lru_cache` 或自定义缓存机制
+- 在关键操作后清除缓存
 
----
+**预期效果**：
+- 减少重复的 DOM 查询
+- 提高检测速度 10-20%
 
-## 优化效果预期
+### 7. 性能监控
 
-1. **减少超时等待**：`user_count()` 超时从频繁发生减少到偶尔发生
-2. **减少误报**：Gemini 发送检测误报减少，更准确判断发送状态
-3. **更好的错误诊断**：错误日志更详细，便于问题定位
-4. **更稳定的执行**：TargetClosedError 得到正确处理，避免意外中断
+**问题**：
+- 当前没有详细的性能监控，难以定位瓶颈
 
----
+**建议**：
+- 添加性能监控装饰器，记录每个方法的耗时
+- 在日志中输出关键阶段的耗时统计
+- 定期输出性能报告
 
-## 后续优化方向
+**预期效果**：
+- 更好地定位性能瓶颈
+- 为后续优化提供数据支持
 
-1. **性能优化**：
-   - 优化 `ensure_ready()` 的搜索策略
-   - 考虑使用更快的选择器
-   - 缓存输入框位置
+## 实施优先级
 
-2. **稳定性优化**：
-   - 增加重试机制
-   - 改进错误恢复
-   - 优化并发控制
+### 高优先级（立即实施）
+1. **ChatGPT `_user_count()` 和 `_assistant_count()` 并行优化**（预期减少 5-10 秒）
+2. **ChatGPT `assistant_wait_timeout` 优化**（预期减少 10-20 秒）
+3. **Gemini 响应稳定检测优化**（预期减少 1-2 秒）
 
-3. **监控优化**：
-   - 添加性能指标收集
-   - 记录关键操作的耗时
-   - 分析失败模式
+### 中优先级（近期实施）
+4. **ChatGPT 输出稳定检测优化**（预期减少 1-2 秒）
+5. **并行优化**（预期减少 5-10 秒）
 
+### 低优先级（长期优化）
+6. **缓存优化**（预期减少 2-5 秒）
+7. **性能监控**（用于持续优化）
+
+## 总体预期效果
+
+### 基于最新日志的实际性能数据
+
+**当前性能**（基于最新日志）：
+- **ChatGPT 单次 ask 时间**：72-110 秒（约 1.2-1.8 分钟）
+- **Gemini 单次 ask 时间**：48-100 秒（约 0.8-1.7 分钟）
+- **整体流程时间**：约 1.9 分钟
+
+**瓶颈分析**：
+1. ChatGPT `user_count()` 检测：26 秒（23:47:47 → 23:48:13）
+2. ChatGPT 新消息内容检测：32 秒（00:09:44 → 00:10:16）
+3. Gemini 响应稳定检测：99 秒（极端情况，00:11:10 → 00:11:13）
+
+### 优化后预期
+
+**实施高优先级优化后**：
+- **ChatGPT 单次 ask 时间**：从 72-110 秒 → 50-80 秒（减少 30-40%）
+- **Gemini 单次 ask 时间**：从 48-100 秒 → 40-70 秒（减少 15-30%）
+- **整体流程时间**：从 1.9 分钟 → 1.3-1.5 分钟（减少 20-30%）
+
+**实施所有优化后**：
+- **ChatGPT 单次 ask 时间**：从 72-110 秒 → 40-70 秒（减少 40-50%）
+- **Gemini 单次 ask 时间**：从 48-100 秒 → 35-60 秒（减少 25-40%）
+- **整体流程时间**：从 1.9 分钟 → 1.0-1.3 分钟（减少 30-45%）
+
+### 关键优化点总结
+
+1. **ChatGPT `user_count()` 检测**：从 26 秒 → 3-5 秒（减少 80-85%）
+2. **ChatGPT 新消息内容检测**：从 32 秒 → 3-8 秒（减少 75-90%）
+3. **Gemini 响应稳定检测**：从 99 秒（极端）→ 1-3 秒（正常情况）
+
+## 最新优化实施（2026-01-01）
+
+### 1. ChatGPT `_user_count()` 和 `_assistant_count()` 并行优化 ✅
+
+**实施内容**：
+- 使用 `asyncio.gather()` 并行尝试所有选择器，取第一个成功的结果
+- 减少单个选择器超时：从 8 秒减少到 3 秒
+- 添加总超时保护：整个方法最多等待 3 秒（并行执行，实际更快）
+
+**预期效果**：
+- `_user_count()` 和 `_assistant_count()` 调用时间从 8 秒减少到 1-3 秒
+- 用户消息确认时间从 26 秒减少到 3-5 秒
+
+### 2. ChatGPT `assistant_wait_timeout` 优化 ✅
+
+**实施内容**：
+- 从 180 秒减少到 120 秒（默认情况）
+- 如果 `assistant_count` 已增加，进一步减少到 60 秒
+- 添加快速检查机制：在计算超时前先快速检查一次 `assistant_count`
+
+**预期效果**：
+- 减少不必要的等待时间
+- 如果 assistant 消息确实没有出现，更快地触发手动检查点
+
+### 3. Gemini 响应稳定检测优化 ✅
+
+**实施内容**：
+- 减少检测间隔：从 0.5 秒减少到 0.3 秒
+- 动态调整稳定次数：短响应（<500 字符）3 次，长响应 5 次
+- 添加快速路径：如果响应长度在 1 秒内没有变化且已稳定 2 次，直接认为稳定
+
+**预期效果**：
+- 短响应（<500 字符）的检测时间从 2.5 秒减少到 1-1.5 秒
+- 长响应的检测时间保持稳定
+- 极端情况（99 秒）应该不会出现
+
+### 4. ChatGPT 输出稳定检测优化 ✅
+
+**实施内容**：
+- 减少稳定时间：从 2.0 秒减少到 1.5 秒
+- 减少检查间隔：从 0.6 秒减少到 0.4 秒
+- 添加快速路径：如果 `generating=False` 且文本长度在 0.5 秒内没有变化，直接认为稳定
+
+**预期效果**：
+- 输出稳定检测时间从 2-3 秒减少到 1-2 秒
+
+### 总体预期效果（实施后）
+
+**基于最新优化的预期**：
+- **ChatGPT 单次 ask 时间**：从 72-110 秒 → 40-70 秒（减少 40-50%）
+- **Gemini 单次 ask 时间**：从 48-100 秒 → 35-60 秒（减少 25-40%）
+- **整体流程时间**：从 1.9 分钟 → 1.0-1.3 分钟（减少 30-45%）
+
+**关键优化点总结（实施后）**：
+1. **ChatGPT `user_count()` 检测**：从 26 秒 → 1-3 秒（减少 88-96%）
+2. **ChatGPT 新消息内容检测**：从 32 秒 → 3-8 秒（减少 75-90%）
+3. **ChatGPT `assistant_wait_timeout`**：从 180 秒 → 60-120 秒（减少 33-67%）
+4. **Gemini 响应稳定检测**：从 99 秒（极端）→ 1-3 秒（正常情况）
+5. **ChatGPT 输出稳定检测**：从 2-3 秒 → 1-2 秒（减少 33-50%）

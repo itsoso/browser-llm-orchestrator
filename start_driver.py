@@ -36,6 +36,7 @@ def load_driver_config(brief_path: Path) -> dict:
         "host": "127.0.0.1",
         "headless": False,
         "prewarm": True,
+        "stealth": True,  # 默认启用 stealth 模式
     }
     
     # 合并配置
@@ -97,6 +98,7 @@ async def main_async():
     print(f"[driver] host: {config['host']}")
     print(f"[driver] headless: {config['headless']}")
     print(f"[driver] prewarm: {config['prewarm']}")
+    print(f"[driver] stealth: {config.get('stealth', True)}")
     
     # 检查预热状态（可选）
     if args.check_warmup:
@@ -118,6 +120,7 @@ async def main_async():
         artifacts_root=Path(config["artifacts_root"]).resolve(),
         headless=config["headless"],
         prewarm=config["prewarm"],
+        stealth=config.get("stealth", True),
     )
 
     import signal

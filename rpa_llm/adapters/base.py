@@ -19,10 +19,21 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 from ..utils import beijing_now_iso, utc_now_iso
 
 # 可选：集成 playwright-stealth 抗风控
+# 支持 playwright-stealth 2.0.0+ (Stealth 类) 和旧版本 (stealth_async 函数)
 try:
-    from playwright_stealth import stealth_async
+    from playwright_stealth import Stealth
+    stealth_available = True
+    stealth_async_func = None  # 新版本使用 Stealth 类
 except ImportError:
-    stealth_async = None
+    try:
+        # 尝试导入旧版本的 stealth_async 函数
+        from playwright_stealth import stealth_async as stealth_async_func
+        Stealth = None
+        stealth_available = True
+    except ImportError:
+        Stealth = None
+        stealth_async_func = None
+        stealth_available = False
 
 
 class SiteAdapter(ABC):
@@ -44,10 +55,11 @@ class SiteAdapter(ABC):
     site_id: str
     base_url: str
 
-    def __init__(self, profile_dir: Path, artifacts_dir: Path, headless: bool = False):
+    def __init__(self, profile_dir: Path, artifacts_dir: Path, headless: bool = False, stealth: bool = True):
         self.profile_dir = profile_dir
         self.artifacts_dir = artifacts_dir
         self.headless = headless
+        self.stealth_enabled = stealth
 
         self._pw = None
         self._context: Optional[BrowserContext] = None
@@ -67,7 +79,7 @@ class SiteAdapter(ABC):
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=str(self.profile_dir),
             executable_path=chrome_path,
-            headless=False,  # strongly recommended headful for LLM sites
+            headless=self.headless,  # headful recommended; allow override for speed/testing
             viewport={"width": 1440, "height": 900},
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -107,19 +119,38 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         )
 
         pages = self._context.pages
-        self._page = pages[0] if pages else await self._context.new_page()
+        if pages:
+            # Keep a single tab to reduce overhead from restored sessions/extensions.
+            self._page = pages[0]
+            for p in pages[1:]:
+                try:
+                    await p.close()
+                except Exception:
+                    pass
+        else:
+            self._page = await self._context.new_page()
 
         # -------------------------
         # Anti-detection: 注入 Stealth 脚本（降低 Cloudflare 触发率）
         # -------------------------
-        if stealth_async:
-            try:
-                await stealth_async(self._page)
-                print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode enabled", flush=True)
-            except Exception as e:
-                print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode failed (non-fatal): {e}", flush=True)
+        if self.stealth_enabled:
+            if stealth_available:
+                try:
+                    if Stealth is not None:
+                        # 新版本 (2.0.0+): 使用 Stealth 类
+                        stealth = Stealth()
+                        await stealth.apply_stealth_async(self._page)
+                        print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode enabled (v2.0.0+)", flush=True)
+                    elif stealth_async_func is not None:
+                        # 旧版本: 使用 stealth_async 函数
+                        await stealth_async_func(self._page)
+                        print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode enabled (legacy)", flush=True)
+                except Exception as e:
+                    print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode failed (non-fatal): {e}", flush=True)
+            else:
+                print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode not available (install: pip install playwright-stealth)", flush=True)
         else:
-            print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode not available (install: pip install playwright-stealth)", flush=True)
+            print(f"[{beijing_now_iso()}] [{self.site_id}] stealth mode disabled (configured in brief.yaml)", flush=True)
 
         # -------------------------
         # Performance diagnostics
@@ -233,12 +264,18 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
         # Fast navigation: commit returns earlier than domcontentloaded/load for SPA sites
         # commit 最快，适合 SPA（React/Vue 等）
-        self._perf["goto"]["start_utc"] = utc_now_iso()
-        t0 = time.perf_counter()
-        await self._page.goto(self.base_url, wait_until="commit", timeout=30000)
-        t1 = time.perf_counter()
-        self._perf["goto"]["end_utc"] = utc_now_iso()
-        self._perf["goto"]["duration_s"] = max(0.0, t1 - t0)
+        current_url = ""
+        try:
+            current_url = self._page.url or ""
+        except Exception:
+            current_url = ""
+        if not (current_url and current_url.startswith(self.base_url)):
+            self._perf["goto"]["start_utc"] = utc_now_iso()
+            t0 = time.perf_counter()
+            await self._page.goto(self.base_url, wait_until="commit", timeout=30000)
+            t1 = time.perf_counter()
+            self._perf["goto"]["end_utc"] = utc_now_iso()
+            self._perf["goto"]["duration_s"] = max(0.0, t1 - t0)
         
         # 等待页面基本就绪（但不等待所有资源）
         # 对于 SPA，commit 后 DOM 可能还没完全加载，给一点时间让 React/Vue 挂载

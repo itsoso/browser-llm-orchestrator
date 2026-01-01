@@ -55,6 +55,7 @@ class DriverServer:
         artifacts_root: Path,
         headless: bool = False,
         prewarm: bool = True,
+        stealth: bool = True,
     ):
         self.host = host
         self.port = port
@@ -63,6 +64,7 @@ class DriverServer:
         self.artifacts_root = artifacts_root
         self.headless = headless
         self.prewarm = prewarm
+        self.stealth = stealth
 
         self._server: Optional[asyncio.AbstractServer] = None
         self._stop = asyncio.Event()
@@ -126,7 +128,7 @@ class DriverServer:
         profile_dir.mkdir(parents=True, exist_ok=True)
         art_dir.mkdir(parents=True, exist_ok=True)
 
-        adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=art_dir, headless=self.headless)
+        adapter = create_adapter(site_id, profile_dir=profile_dir, artifacts_dir=art_dir, headless=self.headless, stealth=self.stealth)
         # 手动进入 async context（常驻）
         try:
             await adapter.__aenter__()

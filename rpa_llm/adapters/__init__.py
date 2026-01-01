@@ -33,6 +33,7 @@ def create_adapter(
     profile_dir: Path,
     artifacts_dir: Path,
     headless: bool = False,
+    stealth: bool = True,
 ) -> SiteAdapter:
     if site_id not in ADAPTERS:
         raise ValueError(f"Unknown site_id: {site_id}")
@@ -40,4 +41,5 @@ def create_adapter(
         profile_dir=profile_dir,
         artifacts_dir=artifacts_dir,
         headless=headless,
+        stealth=stealth,
     )
