@@ -677,9 +677,19 @@ class ChatGPTAdapter(SiteAdapter):
         async def quick_check_sent() -> bool:
             """快速检查是否已发送（直接查询 user_count）"""
             try:
-                # 优化：添加超时控制，避免长时间等待
-                current_user_count = await asyncio.wait_for(self._user_count(), timeout=0.5)
-                if current_user_count > user0:
+                # 优化：添加更短的超时控制，避免长时间等待
+                # 使用 page.evaluate 直接查询，避免 Playwright 的额外开销
+                combined_user_sel = ", ".join(self.USER_MSG)
+                current_user_count = await asyncio.wait_for(
+                    self.page.evaluate(
+                        """(sel) => {
+                            return document.querySelectorAll(sel).length;
+                        }""",
+                        combined_user_sel
+                    ),
+                    timeout=0.3  # 从 0.5 秒减少到 0.3 秒
+                )
+                if isinstance(current_user_count, int) and current_user_count > user0:
                     self._log(f"send: user_count increased ({user0} -> {current_user_count}), send confirmed")
                     return True
             except (asyncio.TimeoutError, Exception):
@@ -687,15 +697,15 @@ class ChatGPTAdapter(SiteAdapter):
             return False
         
         # 优化：减少等待时间，加快确认速度
-        # 立即检查（0.03秒等待，让事件触发）
-        await asyncio.sleep(0.03)
+        # 立即检查（0.02秒等待，让事件触发）
+        await asyncio.sleep(0.02)  # 从 0.03s 减少到 0.02s
         
         # 优先使用快速检查（直接查询 user_count，最可靠）
         if await quick_check_sent():
             return
         
         # 如果快速检查失败，使用并行确认（包含多个信号），但减少超时时间
-        if await self._fast_send_confirm(user0, timeout_ms=800):  # 从 1200ms 减少到 800ms
+        if await self._fast_send_confirm(user0, timeout_ms=600):  # 从 800ms 减少到 600ms
             self._log("send: fast path confirmed (first attempt)")
             return
         
@@ -703,12 +713,12 @@ class ChatGPTAdapter(SiteAdapter):
         if await quick_check_sent():
             return
         
-        # 如果立即检查失败，再等待 0.1 秒后检查一次（减少等待时间）
-        await asyncio.sleep(0.1)  # 从 0.15s 减少到 0.1s
+        # 如果立即检查失败，再等待 0.08 秒后检查一次（减少等待时间）
+        await asyncio.sleep(0.08)  # 从 0.1s 减少到 0.08s
         if await quick_check_sent():
             return
         
-        if await self._fast_send_confirm(user0, timeout_ms=600):  # 从 1000ms 减少到 600ms
+        if await self._fast_send_confirm(user0, timeout_ms=500):  # 从 600ms 减少到 500ms
             self._log("send: fast path confirmed (after short wait)")
             return
         
@@ -719,14 +729,14 @@ class ChatGPTAdapter(SiteAdapter):
         # 兜底：再按一次 Control+Enter（但减少等待时间）
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
-        await asyncio.sleep(0.03)  # 从 0.05s 减少到 0.03s
+        await asyncio.sleep(0.02)  # 从 0.03s 减少到 0.02s
         
         # 优先使用快速检查
         if await quick_check_sent():
             return
         
-        # 再次确认（0.8秒超时，减少等待时间）
-        if await self._fast_send_confirm(user0, timeout_ms=800):  # 从 1200ms 减少到 800ms
+        # 再次确认（0.6秒超时，减少等待时间）
+        if await self._fast_send_confirm(user0, timeout_ms=600):  # 从 800ms 减少到 600ms
             self._log("send: fast path confirmed (second attempt)")
             return
         

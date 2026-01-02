@@ -573,6 +573,7 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         if len(text) < 1000:
             try:
                 # 快速路径：直接使用 evaluate，不等待 focus，添加超时控制
+                # 优化：减少超时时间，如果超时就立即 fallback，避免长时间等待
                 await asyncio.wait_for(
                     tb.evaluate("""(el, t) => {
                         el.focus();
@@ -587,7 +588,7 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                             el.dispatchEvent(new Event('change', {bubbles:true}));
                         }
                     }""", text),
-                    timeout=3.0  # 3 秒超时，避免长时间等待
+                    timeout=1.5  # 从 3 秒减少到 1.5 秒，加快 fallback
                 )
                 return
             except (asyncio.TimeoutError, Exception):
