@@ -792,12 +792,18 @@ class GeminiAdapter(SiteAdapter):
         # 优化：优先使用 Control+Enter（更可靠，避免 Enter 只是换行）
         self._log("send: trying Control+Enter first (most reliable)...")
         try:
-            await tb.focus(timeout=2000)
+            # 优化：减少 focus 超时时间，如果 focus 失败，直接使用 page.keyboard（不依赖 focus）
+            try:
+                await tb.focus(timeout=1000)  # 从 2000ms 减少到 1000ms
+            except Exception:
+                # focus 失败不影响继续，直接使用 page.keyboard
+                pass
+            
             await self.page.keyboard.press("Control+Enter")
             self._log("send: Control+Enter pressed")
             
             # 优化：立即检查，不等待，减少延迟
-            await asyncio.sleep(0.1)  # 最小等待，让事件触发
+            await asyncio.sleep(0.05)  # 从 0.1s 减少到 0.05s
             
             # 快速检查：textbox 是否已清空（最可靠的信号）
             try:
@@ -816,9 +822,9 @@ class GeminiAdapter(SiteAdapter):
             except Exception:
                 pass
             
-            # 如果快速检查失败，再等待 0.2 秒后检查一次
-            await asyncio.sleep(0.2)
-            reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=0.5)
+            # 如果快速检查失败，再等待 0.15 秒后检查一次（减少等待时间）
+            await asyncio.sleep(0.15)  # 从 0.2s 减少到 0.15s
+            reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=0.4)  # 从 0.5s 减少到 0.4s
             if reason:
                 return f"control_enter:{reason}"
         except Exception as e:
@@ -828,7 +834,13 @@ class GeminiAdapter(SiteAdapter):
         # 优化（P0）：Enter 后立即检查输入框是否变空，避免等待按钮超时
         self._log("send: trying Enter as fallback (keyboard)")
         try:
-            await tb.focus(timeout=2000)
+            # 优化：减少 focus 超时时间，如果 focus 失败，直接使用 page.keyboard（不依赖 focus）
+            try:
+                await tb.focus(timeout=1000)  # 从 2000ms 减少到 1000ms
+            except Exception:
+                # focus 失败不影响继续，直接使用 page.keyboard
+                pass
+            
             await self.page.keyboard.press("Enter")
         except Exception as e:
             self._log(f"send: Enter(keyboard) error: {type(e).__name__}: {str(e)[:120]}")

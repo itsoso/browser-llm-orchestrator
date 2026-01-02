@@ -581,7 +581,7 @@ class ChatGPTAdapter(SiteAdapter):
                       const n = document.querySelectorAll(sel).length;
                       return n > u0;
                     }""",
-                    {"u0": user0, "sel": combined_user_sel},
+                    arg={"u0": user0, "sel": combined_user_sel},
                     timeout=timeout_ms,
                 )
                 return True
@@ -611,7 +611,7 @@ class ChatGPTAdapter(SiteAdapter):
                       }
                       return false;
                     }""",
-                    {"sel": combined_stop_sel},
+                    arg={"sel": combined_stop_sel},
                     timeout=min(timeout_ms, 800),  # stop button 检查最多 0.8 秒
                 )
                 return True
@@ -661,15 +661,16 @@ class ChatGPTAdapter(SiteAdapter):
                 pass
             return False
         
-        # 立即检查（0.1秒等待，让事件触发）
-        await asyncio.sleep(0.1)
+        # 优化：减少等待时间，加快确认速度
+        # 立即检查（0.05秒等待，让事件触发）
+        await asyncio.sleep(0.05)
         
-        # 优先使用快速检查（直接查询 user_count）
+        # 优先使用快速检查（直接查询 user_count，最可靠）
         if await quick_check_sent():
             return
         
-        # 如果快速检查失败，使用并行确认（包含多个信号）
-        if await self._fast_send_confirm(user0, timeout_ms=2000):
+        # 如果快速检查失败，使用并行确认（包含多个信号），但减少超时时间
+        if await self._fast_send_confirm(user0, timeout_ms=1200):
             self._log("send: fast path confirmed (first attempt)")
             return
         
@@ -677,12 +678,12 @@ class ChatGPTAdapter(SiteAdapter):
         if await quick_check_sent():
             return
         
-        # 如果立即检查失败，再等待 0.3 秒后检查一次
-        await asyncio.sleep(0.3)
+        # 如果立即检查失败，再等待 0.15 秒后检查一次（减少等待时间）
+        await asyncio.sleep(0.15)
         if await quick_check_sent():
             return
         
-        if await self._fast_send_confirm(user0, timeout_ms=1500):
+        if await self._fast_send_confirm(user0, timeout_ms=1000):
             self._log("send: fast path confirmed (after short wait)")
             return
         
@@ -690,17 +691,17 @@ class ChatGPTAdapter(SiteAdapter):
         if await quick_check_sent():
             return
         
-        # 兜底：再按一次 Control+Enter
+        # 兜底：再按一次 Control+Enter（但减少等待时间）
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
         
         # 优先使用快速检查
         if await quick_check_sent():
             return
         
-        # 再次确认（2秒超时）
-        if await self._fast_send_confirm(user0, timeout_ms=2000):
+        # 再次确认（1.2秒超时，减少等待时间）
+        if await self._fast_send_confirm(user0, timeout_ms=1200):
             self._log("send: fast path confirmed (second attempt)")
             return
         
@@ -1467,7 +1468,7 @@ class ChatGPTAdapter(SiteAdapter):
                 combined_sel = ", ".join(self.ASSISTANT_MSG)
                 # 修复：wait_for_function 的正确调用方式
                 # Playwright 的 wait_for_function 签名：wait_for_function(expression, arg=None, timeout=None)
-                # 需要将参数作为关键字参数传递
+                # 注意：arg 和 timeout 都必须作为关键字参数传递
                 await self.page.wait_for_function(
                     """(args) => {
                         const n0 = args.n0;
