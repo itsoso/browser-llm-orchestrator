@@ -751,6 +751,60 @@ class ChatGPTAdapter(SiteAdapter):
             return has_stop if isinstance(has_stop, bool) else False
         except Exception:
             return False
+    
+    async def _is_thinking(self) -> bool:
+        """
+        检查 ChatGPT Pro 是否还在思考中（思考模式）。
+        
+        思考状态的特征：
+        - 页面中包含 "思考中"、"thinking"、"Pro 思考" 等文本
+        - 可能显示 "立即回答" 按钮（表示可以中断思考）
+        - 思考状态通常在 assistant 消息区域显示
+        
+        Returns:
+            True 如果检测到思考状态，False 否则
+        """
+        try:
+            # 使用 JS evaluate 直接查询，避免 Playwright 的额外开销
+            is_thinking = await self.page.evaluate(
+                """() => {
+                    // 方法1: 查找包含 "思考中" 或 "thinking" 的文本
+                    const bodyText = document.body.innerText || document.body.textContent || '';
+                    const thinkingKeywords = ['思考中', 'thinking', 'Pro 思考', 'Final output', '立即回答'];
+                    for (const keyword of thinkingKeywords) {
+                        if (bodyText.includes(keyword)) {
+                            // 进一步验证：确保是在 assistant 消息区域
+                            // 查找最近的 assistant 消息元素
+                            const assistantMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+                            if (assistantMsgs.length > 0) {
+                                const lastMsg = assistantMsgs[assistantMsgs.length - 1];
+                                const msgText = lastMsg.innerText || lastMsg.textContent || '';
+                                // 如果最后一条消息包含思考关键词，或者消息很短（可能是思考占位符）
+                                if (msgText.includes(keyword) || (msgText.length < 50 && keyword === '思考中')) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 方法2: 查找 "立即回答" 按钮（思考模式下会出现）
+                    const answerNowButtons = document.querySelectorAll('button, a, span');
+                    for (let btn of answerNowButtons) {
+                        const btnText = (btn.innerText || btn.textContent || '').trim();
+                        if (btnText === '立即回答' || btnText === 'Answer immediately') {
+                            // 如果按钮可见，说明还在思考中
+                            if (btn.offsetParent !== null) {
+                                return true;
+                            }
+                        }
+                    }
+                    
+                    return false;
+                }"""
+            )
+            return is_thinking if isinstance(is_thinking, bool) else False
+        except Exception:
+            return False
 
     async def _arm_input_events(self, tb: Locator) -> None:
         """
@@ -2375,6 +2429,21 @@ class ChatGPTAdapter(SiteAdapter):
                         except Exception:
                             generating = False
                         
+                        # 关键修复：检查 ChatGPT Pro 是否还在思考中
+                        # 思考模式下，即使 generating=False 且内容没有变化，也不代表处理完成
+                        try:
+                            thinking = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                        except Exception:
+                            thinking = False
+                        
+                        if thinking:
+                            self._log(f"ask: ChatGPT Pro 还在思考中，继续等待（len={current_len}, remaining={remaining:.1f}s）")
+                            # 思考状态下，即使内容没有变化，也要继续等待
+                            # 重置 last_change，避免过早认为稳定
+                            last_change = time.time()
+                            await asyncio.sleep(0.3)
+                            continue
+                        
                         # 补充逻辑：如果文本长度在增加，强制认为 generating=True
                         if not generating and current_len > 0:
                             last_text_len_history.append((time.time(), current_len))
@@ -2391,8 +2460,9 @@ class ChatGPTAdapter(SiteAdapter):
                             continue
                         
                         # 快速路径：如果 generating=False 且文本长度在 0.5 秒内没有变化，直接认为稳定
+                        # 关键修复：必须确保不在思考状态，才能认为稳定
                         time_since_change = time.time() - last_change
-                        if current_len > 0 and (not generating) and time_since_change >= 0.5 and time_since_change >= stable_seconds:
+                        if current_len > 0 and (not generating) and (not thinking) and time_since_change >= 0.5 and time_since_change >= stable_seconds:
                             # P1优化：稳定后，只拉取一次完整文本
                             if not final_text_fetched:
                                 try:
@@ -2412,7 +2482,8 @@ class ChatGPTAdapter(SiteAdapter):
                             return final_text, self.page.url
                         
                         # 原有逻辑：稳定时间达到且不在生成
-                        if current_len > 0 and (time.time() - last_change) >= stable_seconds and (not generating):
+                        # 关键修复：必须确保不在思考状态，才能认为稳定
+                        if current_len > 0 and (time.time() - last_change) >= stable_seconds and (not generating) and (not thinking):
                             # P1优化：稳定后，只拉取一次完整文本
                             if not final_text_fetched:
                                 try:
@@ -2443,7 +2514,11 @@ class ChatGPTAdapter(SiteAdapter):
                         generating = await asyncio.wait_for(self._is_generating(), timeout=0.5)
                     except (asyncio.TimeoutError, Exception):
                         generating = False
-                    self._log(f"ask: generating={generating}, last_len={last_text_len}, remaining={remaining:.1f}s ...")
+                    try:
+                        thinking = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                    except (asyncio.TimeoutError, Exception):
+                        thinking = False
+                    self._log(f"ask: generating={generating}, thinking={thinking}, last_len={last_text_len}, remaining={remaining:.1f}s ...")
                     hb = time.time()
 
                 # 优化：减少检查间隔，从0.4秒减少到0.3秒，加快检测速度
