@@ -206,6 +206,7 @@ class DriverServer:
                 site_id = payload.get("site_id")
                 prompt = payload.get("prompt")
                 timeout_s = int(payload.get("timeout_s", 1200))
+                model_version = payload.get("model_version")  # 可选的模型版本参数
                 if not site_id or not prompt:
                     await self._write_json(writer, 400, {"ok": False, "error": "missing site_id or prompt"})
                     return
@@ -214,8 +215,9 @@ class DriverServer:
                     return
                 try:
                     plen = len(prompt) if isinstance(prompt, str) else -1
+                    model_info = f" | model_version={model_version}" if model_version else ""
                     print(
-                        f"[{beijing_now_iso()}] [driver] run_task recv | site={site_id} | prompt_len={plen} | timeout_s={timeout_s}",
+                        f"[{beijing_now_iso()}] [driver] run_task recv | site={site_id} | prompt_len={plen} | timeout_s={timeout_s}{model_info}",
                         flush=True,
                     )
                 except Exception:
@@ -245,10 +247,18 @@ class DriverServer:
                     t0 = time.perf_counter()
 
                     try:
-                        # adapter.ask(prompt, timeout_s=...) 兼容 ChatGPT；其他 adapter 也支持 timeout_s 参数则传入
+                        # adapter.ask(prompt, timeout_s=..., model_version=...) 兼容 ChatGPT；其他 adapter 也支持这些参数则传入
                         adapter = rt.adapter
                         try:
-                            answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+                            # 尝试传递 model_version 参数（ChatGPT adapter 支持）
+                            if model_version:
+                                try:
+                                    answer, url = await adapter.ask(prompt, timeout_s=timeout_s, model_version=model_version)
+                                except TypeError:
+                                    # 如果 adapter 不支持 model_version 参数，回退到只传 timeout_s
+                                    answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+                            else:
+                                answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
                         except TypeError:
                             answer, url = await adapter.ask(prompt)  # fallback
                         ok = True
