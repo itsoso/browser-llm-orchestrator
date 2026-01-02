@@ -1274,9 +1274,24 @@ class ChatGPTAdapter(SiteAdapter):
                             pass  # 检查失败不影响继续
                         
                         # 只有在 type_success 为 False 时才尝试 type()
+                        # 修复：对于 contenteditable，不要使用 type()，而是使用 JS 注入
                         if not type_success:
+                            # 再次检查元素类型，确保不是 contenteditable
+                            try:
+                                tb_kind = await self._tb_kind(tb)
+                                if tb_kind == "contenteditable":
+                                    # 对于 contenteditable，强制使用 JS 注入，避免 type() 导致的字符错乱
+                                    self._log(f"send: detected contenteditable before type(), using JS injection instead...")
+                                    use_js_inject = True  # 强制使用 JS 注入
+                                    # 重新进入 JS 注入逻辑
+                                    continue  # 跳出当前逻辑，重新进入 JS 注入分支
+                            except Exception:
+                                # 检测失败，继续原有逻辑
+                                pass
+                            
                             try:
                                 # 优化：使用 asyncio.wait_for 包装，确保超时被正确处理，避免 Future exception
+                                # 注意：这里只对 textarea 使用 type()，contenteditable 应该已经在上面的检查中被重定向到 JS 注入
                                 await asyncio.wait_for(
                                     tb.type(prompt, delay=0, timeout=timeout_ms),
                                     timeout=timeout_ms / 1000.0 + 5.0  # 额外 5 秒缓冲
