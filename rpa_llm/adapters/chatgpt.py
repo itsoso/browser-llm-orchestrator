@@ -1010,10 +1010,17 @@ class ChatGPTAdapter(SiteAdapter):
                             }}
                         }}
                         """
-                        await asyncio.wait_for(
-                            tb.evaluate(js_code),
-                            timeout=20.0
-                        )
+                        try:
+                            await asyncio.wait_for(
+                                tb.evaluate(js_code),
+                                timeout=20.0
+                            )
+                        except Exception as eval_err:
+                            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                            if "TargetClosed" in str(eval_err) or "Target page" in str(eval_err) or "Target context" in str(eval_err):
+                                raise RuntimeError(f"Browser/page closed during JS evaluate: {eval_err}") from eval_err
+                            raise  # 其他异常继续抛出
+                        
                         await self._arm_input_events(tb)
                         self._log("send: injected via JS + triggered all input events (input/change/beforeinput/keydown/blur/focus)")
                         
@@ -1058,7 +1065,13 @@ class ChatGPTAdapter(SiteAdapter):
                     # 策略 B: 如果 _tb_set_text 失败，再尝试 type()
                     try:
                         # 确保元素可见和可交互
-                        await tb.wait_for(state="attached", timeout=10000)
+                        try:
+                            await tb.wait_for(state="attached", timeout=10000)
+                        except Exception as wait_err:
+                            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                            if "TargetClosed" in str(wait_err) or "Target page" in str(wait_err) or "Target context" in str(wait_err):
+                                raise RuntimeError(f"Browser/page closed during wait_for: {wait_err}") from wait_err
+                            raise  # 其他异常继续抛出
                         
                         # 最终验证：确保 prompt 中没有任何换行符（双重保险）
                         prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"send: {msg}"))
@@ -1070,13 +1083,12 @@ class ChatGPTAdapter(SiteAdapter):
                         
                         try:
                             # 优化：添加超时控制，避免 _tb_set_text 长时间阻塞
-                            await asyncio.wait_for(
-                                self._tb_set_text(tb, prompt),
-                                timeout=min(30.0, max(5.0, prompt_len * 0.05))  # 动态超时：每字符 50ms，最小 5 秒，最大 30 秒
-                            )
+                            # 注意：直接调用 _tb_set_text，不使用 asyncio.wait_for，避免 Future exception
+                            # 因为 _tb_set_text 内部已经有超时控制
+                            await self._tb_set_text(tb, prompt)
                             self._log(f"send: set text via _tb_set_text (len={prompt_len})")
                             type_success = True
-                        except (asyncio.TimeoutError, Exception) as set_text_err:
+                        except (asyncio.TimeoutError, RuntimeError, Exception) as set_text_err:
                             # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
                             if "TargetClosed" in str(set_text_err) or "Target page" in str(set_text_err) or "Target context" in str(set_text_err):
                                 self._log(f"send: browser/page closed during _tb_set_text, raising error")
