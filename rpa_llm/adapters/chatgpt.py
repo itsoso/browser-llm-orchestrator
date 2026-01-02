@@ -1129,6 +1129,29 @@ class ChatGPTAdapter(SiteAdapter):
                         except Exception:
                             pass
                         
+                        # 修复：在 type() 之前检查输入框是否已有内容（防止重复输入）
+                        try:
+                            existing_text = await self._tb_get_text(tb)
+                            if existing_text.strip():
+                                existing_len = len(existing_text.strip())
+                                expected_len = len(prompt.strip())
+                                existing_ratio = existing_len / expected_len if expected_len > 0 else 0
+                                # 如果已有内容且长度接近或超过预期，说明可能已经输入过了
+                                if existing_ratio >= 0.80:
+                                    self._log(f"send: textbox already has content (len={existing_len}, ratio={existing_ratio:.2%}), checking if it matches prompt...")
+                                    # 检查是否与 prompt 匹配
+                                    if existing_text.strip() == prompt.strip():
+                                        self._log(f"send: textbox content matches prompt, skipping type()")
+                                        type_success = True
+                                        break
+                                    elif existing_ratio > 1.20:
+                                        # 如果内容比预期长很多，可能是重复输入，清空后继续
+                                        self._log(f"send: textbox content appears duplicated (ratio={existing_ratio:.2%}), clearing...")
+                                        await self._tb_clear(tb)
+                                        await asyncio.sleep(0.3)
+                        except Exception:
+                            pass  # 检查失败不影响继续
+                        
                         # 只有在 type_success 为 False 时才尝试 type()
                         if not type_success:
                             try:
@@ -1314,6 +1337,23 @@ class ChatGPTAdapter(SiteAdapter):
                 expected_len = len(prompt_clean)
                 len_ratio = actual_len / expected_len if expected_len > 0 else 0
                 
+                # 修复：如果 ratio > 150%，说明内容可能被重复输入了，需要清空并重试
+                if len_ratio > 1.50:
+                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 150%), clearing and retrying...")
+                    # 清空并重试
+                    try:
+                        await self._tb_clear(tb)
+                        await asyncio.sleep(0.5)
+                        # 验证是否清空
+                        check = await self._tb_get_text(tb)
+                        if check.strip():
+                            # 如果还有内容，再清空一次
+                            await self._tb_clear(tb)
+                            await asyncio.sleep(0.3)
+                    except Exception:
+                        pass
+                    continue  # 触发下一次重试
+                
                 # 检查长度是否足够（至少 80% 即可接受，避免过度重试导致重复发送）
                 # 如果内容已经达到 80%，即使不完全匹配，也接受（避免过度重试）
                 if len_ratio < 0.80:
@@ -1409,6 +1449,23 @@ class ChatGPTAdapter(SiteAdapter):
                 
                 # 额外检查：验证开头和结尾是否匹配（防止中间截断）
                 # 但如果内容已经达到 80%，即使开头/结尾不完全匹配，也接受（避免过度重试）
+                # 修复：如果 ratio > 150%，说明内容可能被重复输入了，需要清空并重试
+                if len_ratio > 1.50:
+                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 150%), clearing and retrying...")
+                    # 清空并重试
+                    try:
+                        await self._tb_clear(tb)
+                        await asyncio.sleep(0.5)
+                        # 验证是否清空
+                        check = await self._tb_get_text(tb)
+                        if check.strip():
+                            # 如果还有内容，再清空一次
+                            await self._tb_clear(tb)
+                            await asyncio.sleep(0.3)
+                    except Exception:
+                        pass
+                    continue  # 触发下一次重试
+                
                 if actual_clean and prompt_clean and len_ratio >= 0.80:
                     # 检查开头（前 50 个字符）
                     actual_start = actual_clean[:50].strip()
