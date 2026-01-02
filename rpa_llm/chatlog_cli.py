@@ -15,7 +15,8 @@ from typing import List, Optional
 import yaml
 
 from .chatlog_client import ChatlogClient
-from .models import Task, ModelResult
+from .models import Brief, Task, ModelResult
+from .prompts import SynthesisPromptConfig, build_dual_model_arbitration_prompt
 from .vault import (
     make_run_paths, 
     ensure_dir, 
@@ -24,7 +25,7 @@ from .vault import (
     make_model_output_filename,
     model_output_note_body,
 )
-from .utils import utc_now_iso, beijing_now_iso
+from .utils import utc_now_iso, beijing_now_iso, slugify
 from .driver_client import run_task as driver_run_task
 
 
@@ -57,6 +58,11 @@ async def analyze_chatlog_conversations(
     driver_url: str = None,
     task_timeout_s: int = 480,
     tags: List[str] = None,
+    synthesis_left_site: str = "gemini",
+    synthesis_right_site: str = "chatgpt",
+    arbitrator_site: str = "gemini",
+    synthesis_timeout_s: int = 600,
+    enable_synthesis: bool = True,
 ):
     """
     从 chatlog 获取聊天记录并分析
@@ -238,6 +244,80 @@ async def analyze_chatlog_conversations(
         print(f"\n[{beijing_now_iso()}] [chatlog] 分析完成！共处理 {len(messages)} 条消息")
         print(f"[{beijing_now_iso()}] [chatlog] 结果保存到: {vault_paths['run_root']}")
         
+        # 执行 synthesis（融合）步骤
+        if enable_synthesis and len(all_results) >= 2:
+            # 检查是否有至少两个站点的成功结果
+            ok_results = [r for r in all_results if r.ok]
+            site_ids = {r.site_id for r in ok_results}
+            
+            if len(site_ids) >= 2:
+                print(f"\n[{beijing_now_iso()}] [chatlog] 开始 synthesis（融合）步骤...")
+                try:
+                    # 创建一个简化的 Brief 对象用于 synthesis
+                    brief = Brief(
+                        topic=conv_title,
+                        context=f"聊天记录分析：与 {talker} 的对话",
+                        questions=[],
+                        streams=[],
+                        sites=list(site_ids),
+                        output={},
+                    )
+                    
+                    # 构建 synthesis prompt
+                    cfg = SynthesisPromptConfig(
+                        left_site=synthesis_left_site,
+                        right_site=synthesis_right_site,
+                        left_label=synthesis_left_site.capitalize(),
+                        right_label=synthesis_right_site.capitalize(),
+                    )
+                    synthesis_prompt = build_dual_model_arbitration_prompt(brief, ok_results, cfg)
+                    
+                    print(f"[{beijing_now_iso()}] [chatlog] synthesis prompt 构建完成，发送到 {arbitrator_site}...")
+                    
+                    # 调用 arbitrator 站点生成最终结果
+                    if driver_url:
+                        payload = await asyncio.to_thread(
+                            driver_run_task,
+                            driver_url,
+                            arbitrator_site,
+                            synthesis_prompt,
+                            synthesis_timeout_s
+                        )
+                        ok = bool(payload.get("ok"))
+                        answer = payload.get("answer") or ""
+                        url = payload.get("url") or ""
+                        err = payload.get("error")
+                        
+                        if not ok:
+                            raise RuntimeError(f"driver synthesis failed (site={arbitrator_site}): {err}")
+                    else:
+                        raise RuntimeError("未提供 driver_url，无法执行 synthesis")
+                    
+                    # 保存 synthesis 结果
+                    topic_slug = slugify(conv_title, max_len=40)
+                    final_path = vault_paths["final"] / f"final__{arbitrator_site}__{topic_slug}.md"
+                    write_markdown(
+                        final_path,
+                        {
+                            "type": ["synthesis", "final_decision", "chatlog_analysis"],
+                            "created": utc_now_iso(),
+                            "author": arbitrator_site,
+                            "run_id": run_id,
+                            "topic": conv_title,
+                            "url": url,
+                            "tags": tags[:12],
+                        },
+                        answer
+                    )
+                    
+                    print(f"[{beijing_now_iso()}] [chatlog] ✓ synthesis 完成，结果保存到: {final_path}")
+                except Exception as e:
+                    print(f"[{beijing_now_iso()}] [chatlog] ✗ synthesis 失败: {e}")
+            else:
+                print(f"[{beijing_now_iso()}] [chatlog] 跳过 synthesis：需要至少 2 个站点的成功结果（当前: {len(site_ids)} 个站点）")
+        elif not enable_synthesis:
+            print(f"[{beijing_now_iso()}] [chatlog] synthesis 已禁用")
+        
     finally:
         await client.close()
 
@@ -259,6 +339,11 @@ def main():
     parser.add_argument("--driver-url", default=None, help="driver_server URL（默认: 从环境变量或 brief.yaml 读取）")
     parser.add_argument("--task-timeout-s", type=int, default=480, help="任务超时时间（秒，默认: 480）")
     parser.add_argument("--tags", nargs="+", default=["Chatlog", "Multi-LLM", "Analysis"], help="标签列表")
+    parser.add_argument("--synthesis-left-site", default="gemini", help="synthesis 左侧站点（默认: gemini）")
+    parser.add_argument("--synthesis-right-site", default="chatgpt", help="synthesis 右侧站点（默认: chatgpt）")
+    parser.add_argument("--arbitrator-site", default="gemini", help="synthesis 仲裁站点（默认: gemini）")
+    parser.add_argument("--synthesis-timeout-s", type=int, default=600, help="synthesis 超时时间（秒，默认: 600）")
+    parser.add_argument("--no-synthesis", action="store_true", help="禁用 synthesis（融合）步骤")
     parser.add_argument("--log-file", help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
     
     args = parser.parse_args()
@@ -324,15 +409,30 @@ def main():
         driver_url = os.environ.get("RPA_DRIVER_URL", "").strip() or None
     
     # 如果还没有，尝试从 brief.yaml 读取
+    synthesis_left_site = args.synthesis_left_site
+    synthesis_right_site = args.synthesis_right_site
+    arbitrator_site = args.arbitrator_site
+    synthesis_timeout_s = args.synthesis_timeout_s
+    
     if not driver_url:
         try:
-            import yaml
             brief_path = Path("brief.yaml")
             if brief_path.exists():
                 brief_data = yaml.safe_load(brief_path.read_text(encoding="utf-8"))
-                driver_url = brief_data.get("output", {}).get("driver_url", "").strip() or None
+                output_config = brief_data.get("output", {})
+                driver_url = output_config.get("driver_url", "").strip() or None
                 if driver_url:
                     print(f"[{beijing_now_iso()}] [chatlog] 从 brief.yaml 读取 driver_url: {driver_url}")
+                
+                # 从 brief.yaml 读取 synthesis 配置（如果未通过命令行指定）
+                if args.synthesis_left_site == "gemini":  # 默认值
+                    synthesis_left_site = output_config.get("synthesis_left_site", "gemini")
+                if args.synthesis_right_site == "chatgpt":  # 默认值
+                    synthesis_right_site = output_config.get("synthesis_right_site", "chatgpt")
+                if args.arbitrator_site == "gemini":  # 默认值
+                    arbitrator_site = output_config.get("arbitrator_site", "gemini")
+                if args.synthesis_timeout_s == 600:  # 默认值
+                    synthesis_timeout_s = output_config.get("synthesis_timeout_s", 600)
         except Exception as e:
             # 忽略错误，继续执行
             pass
@@ -347,21 +447,26 @@ def main():
     
     try:
         asyncio.run(analyze_chatlog_conversations(
-            chatlog_url=args.chatlog_url,
-            chatlog_api_key=args.chatlog_api_key,
-            talker=args.talker,
-            time_range=args.time_range,
-            start=start,
-            end=end,
-            sender=args.sender,
-            keyword=args.keyword,
-            limit=args.limit,
-            sites=args.sites,
-            prompt_template=prompt_template,
-            vault_path=vault_path,
-            driver_url=driver_url,
-            task_timeout_s=args.task_timeout_s,
-            tags=args.tags,
+        chatlog_url=args.chatlog_url,
+        chatlog_api_key=args.chatlog_api_key,
+        talker=args.talker,
+        time_range=args.time_range,
+        start=start,
+        end=end,
+        sender=args.sender,
+        keyword=args.keyword,
+        limit=args.limit,
+        sites=args.sites,
+        prompt_template=prompt_template,
+        vault_path=vault_path,
+        driver_url=driver_url,
+        task_timeout_s=args.task_timeout_s,
+        tags=args.tags,
+        synthesis_left_site=synthesis_left_site,
+        synthesis_right_site=synthesis_right_site,
+        arbitrator_site=arbitrator_site,
+        synthesis_timeout_s=synthesis_timeout_s,
+            enable_synthesis=not args.no_synthesis,
         ))
     finally:
         # 恢复原始的 stdout 和 stderr
