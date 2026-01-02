@@ -563,13 +563,39 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     async def _tb_set_text(self, tb: Locator, text: str) -> None:
         """
         统一设置 textbox 文本内容，自动适配 textarea 和 contenteditable。
+        优化：减少等待时间，加快输入速度。
         
         Args:
             tb: Playwright Locator 对象
             text: 要设置的文本内容
         """
+        # 优化：对于短文本，直接使用 evaluate，避免 focus() 的等待
+        if len(text) < 500:
+            try:
+                # 快速路径：直接使用 evaluate，不等待 focus
+                await tb.evaluate("""(el, t) => {
+                    el.focus();
+                    if (el.tagName === 'TEXTAREA') {
+                        el.value = t;
+                        el.dispatchEvent(new Event('input', {bubbles:true}));
+                    } else if (el.contentEditable === 'true') {
+                        const ok = document.execCommand && document.execCommand('insertText', false, t);
+                        if (!ok) el.innerText = t;
+                        el.dispatchEvent(new Event('input', {bubbles:true}));
+                    }
+                }""", text)
+                return
+            except Exception:
+                pass  # 失败后 fallback 到原有逻辑
+        
+        # 原有逻辑（用于长文本或快速路径失败）
         kind = await self._tb_kind(tb)
-        await tb.focus()
+        # 优化：减少 focus 超时时间
+        try:
+            await tb.focus(timeout=1000)  # 从默认超时减少到 1 秒
+        except Exception:
+            pass  # focus 失败不影响继续
+        
         if kind == "textarea":
             # textarea 用 fill 最稳
             await tb.fill(text)

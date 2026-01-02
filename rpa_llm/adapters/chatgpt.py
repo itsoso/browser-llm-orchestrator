@@ -489,16 +489,32 @@ class ChatGPTAdapter(SiteAdapter):
         避免 Playwright locator + wait_for 导致的 Future exception。
         """
         # P0优化：使用 JS evaluate 直接查询，避免 Playwright actionability 等待和 Future exception
-        # 组合所有 STOP_BTN 选择器，用 OR 逻辑查询
-        combined_selector = ", ".join(self.STOP_BTN)
+        # 注意：`:has-text()` 是 Playwright 特有的选择器，不能用于原生 querySelectorAll
+        # 只使用原生 CSS 选择器（aria-label 属性选择器）
+        # 过滤掉包含 `:has-text()` 的选择器
+        native_selectors = [
+            sel for sel in self.STOP_BTN 
+            if ':has-text(' not in sel and 'aria-label' in sel
+        ]
+        
+        if not native_selectors:
+            # 如果没有原生选择器，fallback 到简单的 button 查询
+            native_selectors = ['button[aria-label*="Stop"]', 'button[aria-label*="停止"]']
+        
+        combined_selector = ", ".join(native_selectors)
         try:
             has_stop = await self.page.evaluate(
                 """(sel) => {
-                    const els = document.querySelectorAll(sel);
-                    for (let el of els) {
-                        if (el.offsetParent !== null) {  // 检查是否可见
-                            return true;
+                    try {
+                        const els = document.querySelectorAll(sel);
+                        for (let el of els) {
+                            if (el.offsetParent !== null) {  // 检查是否可见
+                                return true;
+                            }
                         }
+                    } catch (e) {
+                        // 选择器无效，返回 false
+                        return false;
                     }
                     return false;
                 }""",
@@ -568,14 +584,26 @@ class ChatGPTAdapter(SiteAdapter):
             pass
         
         # C) stop button 出现（快速检查）
+        # 注意：`:has-text()` 是 Playwright 特有的选择器，不能用于原生 querySelectorAll
+        # 只使用原生 CSS 选择器（aria-label 属性选择器）
         try:
-            combined_stop_sel = ", ".join(self.STOP_BTN)
+            native_stop_selectors = [
+                sel for sel in self.STOP_BTN 
+                if ':has-text(' not in sel and 'aria-label' in sel
+            ]
+            if not native_stop_selectors:
+                native_stop_selectors = ['button[aria-label*="Stop"]', 'button[aria-label*="停止"]']
+            combined_stop_sel = ", ".join(native_stop_selectors)
             await self.page.wait_for_function(
                 """(args) => {
                   const sel = args.sel;
-                  const els = document.querySelectorAll(sel);
-                  for (let el of els) {
-                    if (el.offsetParent !== null) return true;
+                  try {
+                    const els = document.querySelectorAll(sel);
+                    for (let el of els) {
+                      if (el.offsetParent !== null) return true;
+                    }
+                  } catch (e) {
+                    return false;
                   }
                   return false;
                 }""",
@@ -600,27 +628,28 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("send: pressing Control+Enter (fast path)...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 立即检查（0.1秒等待，让事件触发）
-        await asyncio.sleep(0.1)
+        # 优化：使用更短的等待时间，加快确认速度
+        # 立即检查（0.05秒等待，让事件触发）
+        await asyncio.sleep(0.05)
         
-        # 快速确认（1.2秒超时，减少等待时间）
-        if await self._fast_send_confirm(user0, timeout_ms=1200):
+        # 快速确认（0.8秒超时，减少等待时间）
+        if await self._fast_send_confirm(user0, timeout_ms=800):
             self._log("send: fast path confirmed (first attempt)")
             return
         
-        # 如果立即检查失败，再等待 0.2 秒后检查一次
-        await asyncio.sleep(0.2)
-        if await self._fast_send_confirm(user0, timeout_ms=1000):
+        # 如果立即检查失败，再等待 0.1 秒后检查一次（减少等待时间）
+        await asyncio.sleep(0.1)
+        if await self._fast_send_confirm(user0, timeout_ms=700):
             self._log("send: fast path confirmed (after short wait)")
             return
         
-        # 兜底：再按一次 Control+Enter
+        # 兜底：再按一次 Control+Enter（但减少等待时间）
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
         
-        # 再次确认（1.2秒超时）
-        if await self._fast_send_confirm(user0, timeout_ms=1200):
+        # 再次确认（0.8秒超时）
+        if await self._fast_send_confirm(user0, timeout_ms=800):
             self._log("send: fast path confirmed (second attempt)")
             return
         
@@ -1381,6 +1410,7 @@ class ChatGPTAdapter(SiteAdapter):
             # 这比轮询快得多，且避免 Future exception 和轮询开销
             try:
                 combined_sel = ", ".join(self.ASSISTANT_MSG)
+                # 修复：wait_for_function 的正确调用方式
                 await self.page.wait_for_function(
                     """(args) => {
                         const n0 = args.n0;
@@ -1389,7 +1419,7 @@ class ChatGPTAdapter(SiteAdapter):
                         return n > n0;
                     }""",
                     {"n0": n_assist0, "sel": combined_sel},
-                    timeout=assistant_wait_timeout * 1000  # wait_for_function 使用毫秒
+                    timeout=int(assistant_wait_timeout * 1000)  # wait_for_function 使用毫秒，确保是整数
                 )
                 # 等待成功后，获取实际的 assistant_count
                 n_assist1 = await self._assistant_count()
