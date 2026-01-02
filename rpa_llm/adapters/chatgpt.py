@@ -362,14 +362,35 @@ class ChatGPTAdapter(SiteAdapter):
     async def ensure_ready(self) -> None:
         self._log("ensure_ready: start")
         # 减少初始延迟，页面可能已经加载完成
-        await asyncio.sleep(0.2)
-        # 快速路径：直接用最稳定的选择器探测
+        await asyncio.sleep(0.1)  # 从 0.2 秒减少到 0.1 秒
+        
+        # 快速路径：直接用最稳定的选择器探测（优化：使用 page.evaluate 更快）
         try:
-            loc = self.page.locator('div[id="prompt-textarea"]').first
-            if await loc.count() > 0 and await loc.is_visible():
+            # 优化：使用 page.evaluate 直接检查，避免 Playwright 的额外开销
+            result = await asyncio.wait_for(
+                self.page.evaluate("""() => {
+                    const el = document.querySelector('div[id="prompt-textarea"]');
+                    if (!el) return false;
+                    // 检查元素是否可见（简化检查，不等待 actionability）
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
+                }"""),
+                timeout=0.5  # 快速检查，最多 0.5 秒
+            )
+            if result:
                 self._log("ensure_ready: fast path via prompt-textarea")
                 return
-        except Exception:
+        except (asyncio.TimeoutError, Exception):
+            pass
+        
+        # 优化：如果快速路径失败，尝试使用 locator（但减少超时）
+        try:
+            loc = self.page.locator('div[id="prompt-textarea"]').first
+            if await asyncio.wait_for(loc.count() > 0, timeout=0.3):
+                # 不等待 is_visible()，直接返回（如果元素存在，通常就是可见的）
+                self._log("ensure_ready: fast path via prompt-textarea (count check)")
+                return
+        except (asyncio.TimeoutError, Exception):
             pass
 
         # Cloudflare 直接进入人工点一次（但支持 auto-continue）
@@ -408,8 +429,8 @@ class ChatGPTAdapter(SiteAdapter):
                 self._log(f"ensure_ready: still locating textbox... (attempt {check_count})")
                 hb = time.time()
 
-            # 优化：前几次快速检查，之后逐渐增加间隔，但最大不超过 0.3 秒
-            sleep_time = 0.15 if check_count < 5 else 0.25  # 从 0.2/0.4 减少到 0.15/0.25
+            # 优化：前几次快速检查，之后逐渐增加间隔，但最大不超过 0.2 秒
+            sleep_time = 0.1 if check_count < 5 else 0.2  # 从 0.15/0.25 减少到 0.1/0.2，加快检查频率
             await asyncio.sleep(sleep_time)
 
         await self.save_artifacts("ensure_ready_failed")
@@ -722,8 +743,12 @@ class ChatGPTAdapter(SiteAdapter):
                     elif signal == "stop_button":
                         self._log(f"send: stop button appeared, send confirmed (attempt {attempt+1})")
                     return
-            except (asyncio.TimeoutError, Exception):
-                pass
+            except (asyncio.TimeoutError, Exception) as e:
+                # 优化：捕获所有异常，包括 TargetClosedError，避免 Future exception
+                # 如果是 TargetClosedError，直接抛出，不再继续
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during send confirmation: {e}") from e
+                pass  # 其他异常继续轮询
             
             # 每 0.01 秒检查一次（从 0.02 秒减少到 0.01 秒，更激进）
             await asyncio.sleep(0.01)
@@ -1044,17 +1069,22 @@ class ChatGPTAdapter(SiteAdapter):
                         timeout_ms = max(60000, prompt_len * 50)  # 默认超时值
                         
                         try:
-                            await self._tb_set_text(tb, prompt)
+                            # 优化：添加超时控制，避免 _tb_set_text 长时间阻塞
+                            await asyncio.wait_for(
+                                self._tb_set_text(tb, prompt),
+                                timeout=min(30.0, max(5.0, prompt_len * 0.05))  # 动态超时：每字符 50ms，最小 5 秒，最大 30 秒
+                            )
                             self._log(f"send: set text via _tb_set_text (len={prompt_len})")
                             type_success = True
-                        except Exception as set_text_err:
+                        except (asyncio.TimeoutError, Exception) as set_text_err:
                             # 如果 _tb_set_text 失败，fallback 到 type()
-                            self._log(f"send: _tb_set_text failed ({set_text_err}), trying type()...")
+                            err_msg = str(set_text_err) if set_text_err else "timeout or unknown error"
+                            self._log(f"send: _tb_set_text failed ({err_msg}), trying type()...")
                             
                             # 确保元素有焦点
                             try:
-                                await tb.focus(timeout=3000)
-                            except Exception:
+                                await asyncio.wait_for(tb.focus(), timeout=2.0)  # 从 3 秒减少到 2 秒
+                            except (asyncio.TimeoutError, Exception):
                                 pass  # focus 失败不致命
                             
                             # 设置超时（毫秒），根据长度动态调整
@@ -1563,8 +1593,12 @@ class ChatGPTAdapter(SiteAdapter):
                         self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via high-frequency polling, attempt {attempt+1})")
                         polling_success = True
                         break
-                except (asyncio.TimeoutError, Exception):
-                    pass
+                except (asyncio.TimeoutError, Exception) as e:
+                    # 优化：捕获所有异常，包括 TargetClosedError，避免 Future exception
+                    # 如果是 TargetClosedError，直接抛出，不再继续
+                    if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                        raise RuntimeError(f"Browser/page closed during assistant wait: {e}") from e
+                    pass  # 其他异常继续轮询
                 
                 await asyncio.sleep(0.015)  # 从 0.04 秒减少到 0.015 秒，更激进
             
