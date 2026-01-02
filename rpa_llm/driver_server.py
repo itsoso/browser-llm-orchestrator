@@ -254,9 +254,32 @@ class DriverServer:
                         ok = True
                         err = None
                     except Exception as e:
-                        answer, url = "", ""
-                        ok = False
-                        err = str(e)
+                        # 处理 TargetClosedError：重启 adapter 并重试一次
+                        if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                            try:
+                                if rt.adapter is not None:
+                                    await rt.adapter.__aexit__(None, None, None)
+                            except Exception:
+                                pass
+                            rt.adapter = None
+                            rt.ready = False
+                            try:
+                                await self._ensure_site(site_id)
+                                adapter = rt.adapter
+                                try:
+                                    answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+                                except TypeError:
+                                    answer, url = await adapter.ask(prompt)
+                                ok = True
+                                err = None
+                            except Exception as retry_err:
+                                answer, url = "", ""
+                                ok = False
+                                err = str(retry_err)
+                        else:
+                            answer, url = "", ""
+                            ok = False
+                            err = str(e)
 
                     t1 = time.perf_counter()
                     ended_utc = utc_iso()
