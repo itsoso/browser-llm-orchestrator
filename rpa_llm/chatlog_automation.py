@@ -363,8 +363,8 @@ def main():
     log_file = args.log_file or config.get("logging", {}).get("log_file")
     
     # 设置日志文件（类似 chatlog_cli）
-    if args.log_file:
-        log_file = Path(args.log_file).expanduser().resolve()
+    if log_file:
+        log_file = Path(log_file).expanduser().resolve()
     else:
         logs_dir = Path("logs")
         logs_dir.mkdir(exist_ok=True)
