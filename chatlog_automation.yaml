@@ -1,0 +1,29 @@
+# Chatlog 自动化工作流配置文件
+
+# Chatlog 服务配置
+chatlog:
+  url: "http://127.0.0.1:5030"
+  api_key: null  # 可选，当前 API 不需要
+
+# LLM 分析配置
+llm:
+  arbitrator_site: "chatgpt"  # 可选: chatgpt, gemini
+  model_version: "5.2pro"  # 用于文件名，不影响实际模型选择
+  task_timeout_s: 1200  # 超时时间（秒），默认 600（10分钟），Pro 版本建议 1200（20分钟）或更长
+
+# ChatGPT 模型变体（通过环境变量设置）
+# export CHATGPT_VARIANT=pro  # 可选: pro, thinking, instant
+
+# Obsidian 路径配置
+obsidian:
+  base_path: "~/work/personal/obsidian/personal/10_Sources/WeChat"  # Obsidian 基础路径
+  template: "./templates/chatlog_analysis.md"  # Prompt 模板文件路径（可选）
+
+# Driver Server 配置
+driver:
+  url: null  # 默认从环境变量 RPA_DRIVER_URL 或 brief.yaml 读取
+
+# 日志配置
+logging:
+  log_file: null  # 如果为 null，自动生成到 logs/ 目录
+

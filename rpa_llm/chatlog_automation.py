@@ -304,21 +304,63 @@ async def run_automation(
         await client.close()
 
 
+def load_config(config_path: Optional[Path] = None) -> dict:
+    """
+    加载配置文件
+    
+    Args:
+        config_path: 配置文件路径，如果为 None，尝试加载 chatlog_automation.yaml
+    
+    Returns:
+        配置字典
+    """
+    if config_path is None:
+        config_path = Path("chatlog_automation.yaml")
+    
+    if not config_path.exists():
+        return {}
+    
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        return data or {}
+    except Exception as e:
+        print(f"[{beijing_now_iso()}] [automation] 警告: 加载配置文件失败: {e}", file=sys.stderr)
+        return {}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Chatlog 自动化工作流")
-    parser.add_argument("--chatlog-url", required=True, help="chatlog 服务地址，如 http://127.0.0.1:5030")
+    parser.add_argument("--config", default=None, help="配置文件路径（默认: chatlog_automation.yaml）")
+    parser.add_argument("--chatlog-url", default=None, help="chatlog 服务地址，如 http://127.0.0.1:5030")
     parser.add_argument("--talker", required=True, help="聊天对象标识（必填）")
     parser.add_argument("--start", required=True, help="开始日期，格式为 YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="结束日期，格式为 YYYY-MM-DD")
     parser.add_argument("--base-path", default=None, help="Obsidian 基础路径（默认: ~/work/personal/obsidian/personal/10_Sources/WeChat）")
     parser.add_argument("--template", default=None, help="Prompt 模板文件路径（可选）")
     parser.add_argument("--driver-url", default=None, help="driver_server URL（默认: 从环境变量或 brief.yaml 读取）")
-    parser.add_argument("--arbitrator-site", default="gemini", help="LLM 分析站点（默认: gemini）")
-    parser.add_argument("--model-version", default="5.2pro", help="模型版本（默认: 5.2pro）")
-    parser.add_argument("--task-timeout-s", type=int, default=600, help="任务超时时间（秒，默认: 600）")
-    parser.add_argument("--log-file", help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
+    parser.add_argument("--arbitrator-site", default=None, help="LLM 分析站点（默认: gemini）")
+    parser.add_argument("--model-version", default=None, help="模型版本（默认: 5.2pro）")
+    parser.add_argument("--task-timeout-s", type=int, default=None, help="任务超时时间（秒，默认: 600）")
+    parser.add_argument("--log-file", default=None, help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
     
     args = parser.parse_args()
+    
+    # 加载配置文件
+    config_path = Path(args.config) if args.config else None
+    config = load_config(config_path)
+    
+    # 参数优先级：命令行参数 > 配置文件 > 默认值
+    chatlog_url = args.chatlog_url or config.get("chatlog", {}).get("url") or None
+    if not chatlog_url:
+        parser.error("--chatlog-url 是必填的（可通过命令行参数或配置文件提供）")
+    
+    base_path = args.base_path or config.get("obsidian", {}).get("base_path")
+    template_path = args.template or config.get("obsidian", {}).get("template")
+    driver_url = args.driver_url or config.get("driver", {}).get("url")
+    arbitrator_site = args.arbitrator_site or config.get("llm", {}).get("arbitrator_site", "gemini")
+    model_version = args.model_version or config.get("llm", {}).get("model_version", "5.2pro")
+    task_timeout_s = args.task_timeout_s or config.get("llm", {}).get("task_timeout_s", 600)
+    log_file = args.log_file or config.get("logging", {}).get("log_file")
     
     # 设置日志文件（类似 chatlog_cli）
     if args.log_file:
@@ -362,19 +404,18 @@ def main():
         start = datetime.strptime(args.start, "%Y-%m-%d")
         end = datetime.strptime(args.end, "%Y-%m-%d")
         
-        # 设置基础路径
-        if args.base_path:
-            base_path = Path(args.base_path).expanduser().resolve()
+        # 设置基础路径（优先级：命令行参数 > 配置文件 > 默认值）
+        if base_path:
+            base_path = Path(base_path).expanduser().resolve()
         else:
             base_path = Path("~/work/personal/obsidian/personal/10_Sources/WeChat").expanduser().resolve()
         
         # 设置 template 路径
-        template_path = None
-        if args.template:
-            template_path = Path(args.template).expanduser().resolve()
+        template_path_obj = None
+        if template_path:
+            template_path_obj = Path(template_path).expanduser().resolve()
         
-        # 获取 driver_url
-        driver_url = args.driver_url or None
+        # 获取 driver_url（优先级：命令行/配置文件 > 环境变量 > brief.yaml）
         if not driver_url:
             import os
             driver_url = os.environ.get("RPA_DRIVER_URL", "").strip() or None
@@ -391,17 +432,25 @@ def main():
             except Exception:
                 pass
         
+        # 输出配置信息
+        if config_path and Path(config_path).exists():
+            print(f"[{beijing_now_iso()}] [automation] 使用配置文件: {config_path}")
+        print(f"[{beijing_now_iso()}] [automation] chatlog_url: {chatlog_url}")
+        print(f"[{beijing_now_iso()}] [automation] arbitrator_site: {arbitrator_site}")
+        print(f"[{beijing_now_iso()}] [automation] model_version: {model_version}")
+        print(f"[{beijing_now_iso()}] [automation] task_timeout_s: {task_timeout_s}秒")
+        
         asyncio.run(run_automation(
-            chatlog_url=args.chatlog_url,
+            chatlog_url=chatlog_url,
             talker=args.talker,
             start=start,
             end=end,
             base_path=base_path,
-            template_path=template_path,
+            template_path=template_path_obj,
             driver_url=driver_url,
-            arbitrator_site=args.arbitrator_site,
-            model_version=args.model_version,
-            task_timeout_s=args.task_timeout_s,
+            arbitrator_site=arbitrator_site,
+            model_version=model_version,
+            task_timeout_s=task_timeout_s,
         ))
     finally:
         sys.stdout = original_stdout
