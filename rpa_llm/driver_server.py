@@ -157,6 +157,11 @@ class DriverServer:
             raise  # 重新抛出异常，让调用者知道失败
 
     async def _handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # 添加请求追踪
+        import uuid
+        request_id = str(uuid.uuid4())[:8]
+        recv_time = time.time()
+        
         try:
             req_line = await reader.readline()
             if not req_line:
@@ -219,7 +224,7 @@ class DriverServer:
                     model_info = f" | model_version={model_version}" if model_version else ""
                     new_chat_info = f" | new_chat={new_chat}" if new_chat else ""
                     print(
-                        f"[{beijing_now_iso()}] [driver] run_task recv | site={site_id} | prompt_len={plen} | timeout_s={timeout_s}{model_info}{new_chat_info}",
+                        f"[{beijing_now_iso()}] [driver] run_task recv | request_id={request_id} | site={site_id} | prompt_len={plen} | timeout_s={timeout_s}{model_info}{new_chat_info}",
                         flush=True,
                     )
                 except Exception:
@@ -227,7 +232,19 @@ class DriverServer:
 
                 # 确保 site 常驻 adapter 已启动，并站点内串行
                 rt = self._sites[site_id]
+                lock_wait_start = time.time()
                 async with rt.lock:
+                    lock_wait_time = time.time() - lock_wait_start
+                    if lock_wait_time > 0.1:
+                        print(
+                            f"[{beijing_now_iso()}] [driver] request {request_id} waited {lock_wait_time:.2f}s for lock",
+                            flush=True,
+                        )
+                    process_start_time = time.time()
+                    print(
+                        f"[{beijing_now_iso()}] [driver] request {request_id} start processing | site={site_id}",
+                        flush=True,
+                    )
                     try:
                         await self._ensure_site(site_id)
                     except Exception as e:
@@ -321,6 +338,14 @@ class DriverServer:
                     ended_utc = utc_iso()
                     ended_local = local_iso()
                     dur_s = max(0.0, t1 - t0)
+                    process_dur_s = max(0.0, t1 - process_start_time)
+                    
+                    # 记录请求完成日志
+                    print(
+                        f"[{beijing_now_iso()}] [driver] request {request_id} completed | "
+                        f"site={site_id} | ok={ok} | duration={dur_s:.2f}s | process_duration={process_dur_s:.2f}s",
+                        flush=True,
+                    )
 
                     await self._write_json(
                         writer,

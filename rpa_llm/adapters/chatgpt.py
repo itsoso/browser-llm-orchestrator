@@ -631,8 +631,20 @@ class ChatGPTAdapter(SiteAdapter):
     async def new_chat(self) -> None:
         self._log("new_chat: best effort")
         await self.try_click(self.NEW_CHAT, timeout_ms=2000)
+        
+        # 优化：等待页面加载完成，而不是固定等待时间
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            # 等待网络空闲（但超时时间较短，避免长时间等待）
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass  # networkidle 超时不影响继续
+        except Exception:
+            pass  # 页面加载超时不影响继续
+        
         # 新聊天会重绘输入框，等待页面稳定
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.0)  # 从 1.5 秒减少到 1.0 秒，因为上面已经等待了页面加载
         # 关闭可能的弹窗/遮罩
         await self._dismiss_overlays()
         await asyncio.sleep(0.5)
@@ -990,10 +1002,10 @@ class ChatGPTAdapter(SiteAdapter):
             # 每 0.005 秒检查一次（从 0.01 秒减少到 0.005 秒，更激进）
             await asyncio.sleep(0.005)
         
-        # 如果高频轮询失败，尝试并行确认（作为兜底，但减少超时时间）
+        # 如果高频轮询失败，尝试并行确认（作为兜底）
         self._log("send: high-frequency polling failed, trying parallel confirmation...")
-        # P0优化：从 100ms 减少到 50ms，加快确认速度
-        if await self._fast_send_confirm(user0, timeout_ms=50):  # 从 100ms 减少到 50ms
+        # 修复：增加超时时间，从 50ms 增加到 500ms，提高确认成功率
+        if await self._fast_send_confirm(user0, timeout_ms=500):  # 从 50ms 增加到 500ms
             self._log("send: fast path confirmed (parallel confirmation)")
             return
         
@@ -2193,8 +2205,9 @@ class ChatGPTAdapter(SiteAdapter):
                     # 优化：减少超时时间，从 assistant_wait_timeout 减少到 min(assistant_wait_timeout, 3) 秒
                     # 修复：assistant wait 耗时 102 秒的主要原因是 wait_for_function 超时时间太长（90秒）
                     # 应该使用更短的超时时间，如果超时就立即检查文本变化，而不是等待 90 秒
-                    # P1优化：从 3 秒减少到 2 秒，加快检测速度，立即检查文本变化
-                    wait_timeout_ms = int(min(assistant_wait_timeout, 2) * 1000)  # 最多 2 秒（从 3 秒减少到 2 秒）
+                    # 修复：增加超时时间，从 2 秒增加到 10 秒，提高检测成功率
+                    # 对于 ChatGPT Pro 的思考模式，需要更长的等待时间
+                    wait_timeout_ms = int(min(assistant_wait_timeout, 10) * 1000)  # 最多 10 秒（从 2 秒增加到 10 秒）
                     await self.page.wait_for_function(
                         """(args) => {
                             const n0 = args.n0;
