@@ -981,7 +981,11 @@ class ChatGPTAdapter(SiteAdapter):
                 # 1. 对于超长 prompt (>3000 字符)，直接使用 JS 注入（更快更稳）
                 # 2. 对于中等长度，使用 type() 但增加超时时间
                 # 注意：prompt 已经在方法开始时清理了换行符，所以这里不需要再检查换行符
-                use_js_inject = prompt_len > self.JS_INJECT_THRESHOLD
+                # 修复：在循环外部定义 use_js_inject，避免在循环内部重新计算导致状态丢失
+                # 如果这是第一次迭代，根据长度判断；如果之前已经设置为 True（检测到 contenteditable），保持 True
+                if attempt == 0:
+                    use_js_inject = prompt_len > self.JS_INJECT_THRESHOLD
+                # 如果 attempt > 0，use_js_inject 保持之前的值（可能已经被设置为 True）
                 type_success = False
                 
                 if use_js_inject:
