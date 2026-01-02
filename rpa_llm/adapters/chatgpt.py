@@ -2358,89 +2358,89 @@ class ChatGPTAdapter(SiteAdapter):
                             n_assist1 = n_assist0 + 1  # 合成值
                     except Exception:
                         n_assist1 = n_assist0 + 1
-            
-            self._log(f"ask: assistant wait done ({time.time()-t1:.2f}s)")
+        
+        self._log(f"ask: assistant wait done ({time.time()-t1:.2f}s)")
 
-            # 修复 Bug 1: 在使用 n_assist1 计算 target_index 之前，重新查询实际的 assistant_count
-            # 因为 n_assist1 可能是合成值（n_assist0 + 1），而实际可能有更多新消息
-            # 这样可以确保 target_index 指向实际的最新消息，而不是过时的索引
-            try:
-                # 优化：减少超时时间，加快检测
-                n_assist1_actual = await asyncio.wait_for(self._assistant_count(), timeout=1.0)  # 从 2.0 秒减少到 1.0 秒
-                if n_assist1_actual > n_assist0:
-                    # 如果实际计数大于 n_assist0，使用实际计数
-                    n_assist1 = n_assist1_actual
-                    self._log(f"ask: using actual assistant_count for target_index: {n_assist1} (was {n_assist1} before re-query)")
-                elif n_assist1 > n_assist0:
-                    # 如果实际计数没有增加，但 n_assist1 已经 > n_assist0（可能是合成值），保持使用 n_assist1
-                    self._log(f"ask: actual count unchanged ({n_assist1_actual}), keeping n_assist1={n_assist1}")
-                else:
-                    # 如果实际计数和 n_assist1 都没有增加，使用实际计数
-                    n_assist1 = n_assist1_actual
-                    self._log(f"ask: no new messages detected, using actual count: {n_assist1}")
-            except Exception as e:
-                # 重新查询失败，使用现有的 n_assist1（可能是合成值）
-                # 优化：不记录错误日志，避免噪音（这是正常的 fallback 情况）
-                pass  # 静默失败，使用现有的 n_assist1
-
-            # 优化：等待新消息的文本内容出现（使用索引定位而不是 last != before）
-            # 当 assistant_count(after)=k 时，读取第 k-1 条 assistant 消息（0-index）
-            self._log("ask: waiting for new message content (using index-based detection)...")
-            t2 = time.time()
-            hb = t2
-            new_message_found = False
-            elapsed = time.time() - ask_start_time
-            remaining = timeout_s - elapsed
-            
-            # 优化：如果 assistant_count 已经增加，减少超时时间
-            if n_assist1 > n_assist0:
-                content_wait_timeout = min(3, remaining * 0.08)  # 最多3秒或剩余时间的8%
+        # 修复 Bug 1: 在使用 n_assist1 计算 target_index 之前，重新查询实际的 assistant_count
+        # 因为 n_assist1 可能是合成值（n_assist0 + 1），而实际可能有更多新消息
+        # 这样可以确保 target_index 指向实际的最新消息，而不是过时的索引
+        try:
+            # 优化：减少超时时间，加快检测
+            n_assist1_actual = await asyncio.wait_for(self._assistant_count(), timeout=1.0)  # 从 2.0 秒减少到 1.0 秒
+            if n_assist1_actual > n_assist0:
+                # 如果实际计数大于 n_assist0，使用实际计数
+                n_assist1 = n_assist1_actual
+                self._log(f"ask: using actual assistant_count for target_index: {n_assist1} (was {n_assist1} before re-query)")
+            elif n_assist1 > n_assist0:
+                # 如果实际计数没有增加，但 n_assist1 已经 > n_assist0（可能是合成值），保持使用 n_assist1
+                self._log(f"ask: actual count unchanged ({n_assist1_actual}), keeping n_assist1={n_assist1}")
             else:
-                content_wait_timeout = min(8, remaining * 0.12)  # 最多8秒或剩余时间的12%
+                # 如果实际计数和 n_assist1 都没有增加，使用实际计数
+                n_assist1 = n_assist1_actual
+                self._log(f"ask: no new messages detected, using actual count: {n_assist1}")
+        except Exception as e:
+            # 重新查询失败，使用现有的 n_assist1（可能是合成值）
+            # 优化：不记录错误日志，避免噪音（这是正常的 fallback 情况）
+            pass  # 静默失败，使用现有的 n_assist1
+
+        # 优化：等待新消息的文本内容出现（使用索引定位而不是 last != before）
+        # 当 assistant_count(after)=k 时，读取第 k-1 条 assistant 消息（0-index）
+        self._log("ask: waiting for new message content (using index-based detection)...")
+        t2 = time.time()
+        hb = t2
+        new_message_found = False
+        elapsed = time.time() - ask_start_time
+        remaining = timeout_s - elapsed
+        
+        # 优化：如果 assistant_count 已经增加，减少超时时间
+        if n_assist1 > n_assist0:
+            content_wait_timeout = min(3, remaining * 0.08)  # 最多3秒或剩余时间的8%
+        else:
+            content_wait_timeout = min(8, remaining * 0.12)  # 最多8秒或剩余时间的12%
+        
+        # 优化：使用索引定位，当 assistant_count(after)=k 时，读取第 k-1 条消息（0-index）
+        # 这样可以避免读到空文本或旧节点
+        # 修复 Bug 1: 现在 n_assist1 已经是最新的实际计数，可以安全地计算 target_index
+        target_index = n_assist1 - 1  # 最后一条消息的索引（0-index）
+        if target_index >= 0:
+            # 快速路径：先快速检查一次，如果已经有新内容，直接跳过
+            try:
+                current_text_quick = await asyncio.wait_for(
+                    self._get_assistant_text_by_index(target_index),
+                    timeout=0.8
+                )
+                if current_text_quick and current_text_quick != last_assist_text_before:
+                    new_message_found = True
+                    self._log(f"ask: new message content detected quickly via index {target_index} (len={len(current_text_quick)})")
+            except Exception:
+                pass  # 快速检查失败，继续正常流程
             
-            # 优化：使用索引定位，当 assistant_count(after)=k 时，读取第 k-1 条消息（0-index）
-            # 这样可以避免读到空文本或旧节点
-            # 修复 Bug 1: 现在 n_assist1 已经是最新的实际计数，可以安全地计算 target_index
-            target_index = n_assist1 - 1  # 最后一条消息的索引（0-index）
-            if target_index >= 0:
-                # 快速路径：先快速检查一次，如果已经有新内容，直接跳过
-                try:
-                    current_text_quick = await asyncio.wait_for(
-                        self._get_assistant_text_by_index(target_index),
-                        timeout=0.8
-                    )
-                    if current_text_quick and current_text_quick != last_assist_text_before:
-                        new_message_found = True
-                        self._log(f"ask: new message content detected quickly via index {target_index} (len={len(current_text_quick)})")
-                except Exception:
-                    pass  # 快速检查失败，继续正常流程
-                
-                # 如果快速检查未成功，继续等待
-                if not new_message_found:
-                    while time.time() - t2 < content_wait_timeout:
-                        elapsed = time.time() - ask_start_time
-                        if elapsed >= timeout_s - 10:  # 留10秒给稳定等待
+            # 如果快速检查未成功，继续等待
+            if not new_message_found:
+                while time.time() - t2 < content_wait_timeout:
+                    elapsed = time.time() - ask_start_time
+                    if elapsed >= timeout_s - 10:  # 留10秒给稳定等待
+                        break
+                    try:
+                        # 使用索引定位，确保读取的是新消息
+                        current_text = await asyncio.wait_for(
+                            self._get_assistant_text_by_index(target_index),
+                            timeout=1.2
+                        )
+                        if current_text and current_text != last_assist_text_before:
+                            new_message_found = True
+                            self._log(f"ask: new message content detected via index {target_index} (len={len(current_text)})")
                             break
-                        try:
-                            # 使用索引定位，确保读取的是新消息
-                            current_text = await asyncio.wait_for(
-                                self._get_assistant_text_by_index(target_index),
-                                timeout=1.2
-                            )
-                            if current_text and current_text != last_assist_text_before:
-                                new_message_found = True
-                                self._log(f"ask: new message content detected via index {target_index} (len={len(current_text)})")
-                                break
-                        except asyncio.TimeoutError:
-                            pass
-                        except Exception as e:
-                            self._log(f"ask: _get_assistant_text_by_index({target_index}) error: {e}")
-                            
-                        if time.time() - hb >= 5:
-                            self._log(f"ask: still waiting for new message content (index {target_index})... (elapsed={elapsed:.1f}s/{timeout_s}s)")
-                            hb = time.time()
-                        # 优化：减少等待间隔，从0.3秒减少到0.2秒，加快检测速度
-                        await asyncio.sleep(0.2)
+                    except asyncio.TimeoutError:
+                        pass
+                    except Exception as e:
+                        self._log(f"ask: _get_assistant_text_by_index({target_index}) error: {e}")
+                    
+                    if time.time() - hb >= 5:
+                        self._log(f"ask: still waiting for new message content (index {target_index})... (elapsed={elapsed:.1f}s/{timeout_s}s)")
+                        hb = time.time()
+                    # 优化：减少等待间隔，从0.3秒减少到0.2秒，加快检测速度
+                    await asyncio.sleep(0.2)
             else:
                 # 如果 target_index < 0，fallback 到旧的 _last_assistant_text 方法
                 self._log("ask: warning - target_index < 0, falling back to _last_assistant_text")
