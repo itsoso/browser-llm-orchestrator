@@ -569,48 +569,69 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             tb: Playwright Locator 对象
             text: 要设置的文本内容
         """
-        # 优化：对于短文本，直接使用 evaluate，避免 focus() 的等待
-        if len(text) < 500:
+        # 优化：对于短文本（< 1000 字符），直接使用 evaluate，避免 focus() 的等待
+        if len(text) < 1000:
             try:
-                # 快速路径：直接使用 evaluate，不等待 focus
-                await tb.evaluate("""(el, t) => {
-                    el.focus();
-                    if (el.tagName === 'TEXTAREA') {
-                        el.value = t;
-                        el.dispatchEvent(new Event('input', {bubbles:true}));
-                    } else if (el.contentEditable === 'true') {
-                        const ok = document.execCommand && document.execCommand('insertText', false, t);
-                        if (!ok) el.innerText = t;
-                        el.dispatchEvent(new Event('input', {bubbles:true}));
-                    }
-                }""", text)
+                # 快速路径：直接使用 evaluate，不等待 focus，添加超时控制
+                await asyncio.wait_for(
+                    tb.evaluate("""(el, t) => {
+                        el.focus();
+                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                            el.value = t;
+                            el.dispatchEvent(new Event('input', {bubbles:true}));
+                            el.dispatchEvent(new Event('change', {bubbles:true}));
+                        } else if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                            const ok = document.execCommand && document.execCommand('insertText', false, t);
+                            if (!ok) el.innerText = t;
+                            el.dispatchEvent(new Event('input', {bubbles:true}));
+                            el.dispatchEvent(new Event('change', {bubbles:true}));
+                        }
+                    }""", text),
+                    timeout=3.0  # 3 秒超时，避免长时间等待
+                )
                 return
-            except Exception:
+            except (asyncio.TimeoutError, Exception):
                 pass  # 失败后 fallback 到原有逻辑
         
         # 原有逻辑（用于长文本或快速路径失败）
-        kind = await self._tb_kind(tb)
+        # 优化：减少 _tb_kind 的超时时间
+        try:
+            kind = await asyncio.wait_for(self._tb_kind(tb), timeout=1.0)
+        except (asyncio.TimeoutError, Exception):
+            kind = "unknown"
+        
         # 优化：减少 focus 超时时间
         try:
-            await tb.focus(timeout=1000)  # 从默认超时减少到 1 秒
-        except Exception:
+            await asyncio.wait_for(tb.focus(), timeout=0.5)  # 从 1 秒减少到 0.5 秒
+        except (asyncio.TimeoutError, Exception):
             pass  # focus 失败不影响继续
         
         if kind == "textarea":
-            # textarea 用 fill 最稳
-            await tb.fill(text)
+            # textarea 用 fill 最稳，但添加超时控制
+            try:
+                await asyncio.wait_for(tb.fill(text), timeout=5.0)  # 5 秒超时
+            except (asyncio.TimeoutError, Exception) as e:
+                raise RuntimeError(f"_tb_set_text: fill() timeout or failed: {e}")
             return
 
         # contenteditable：用 insertText 更接近真实输入；失败再 innerText
         try:
-            await tb.evaluate("""(el, t) => {
-                el.focus();
-                const ok = document.execCommand && document.execCommand('insertText', false, t);
-                if (!ok) el.innerText = t;
-                el.dispatchEvent(new Event('input', {bubbles:true}));
-            }""", text)
-        except Exception:
-            await tb.type(text, delay=0)
+            await asyncio.wait_for(
+                tb.evaluate("""(el, t) => {
+                    el.focus();
+                    const ok = document.execCommand && document.execCommand('insertText', false, t);
+                    if (!ok) el.innerText = t;
+                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                }""", text),
+                timeout=5.0  # 5 秒超时
+            )
+        except (asyncio.TimeoutError, Exception):
+            # 最后 fallback 到 type()，但也要添加超时
+            try:
+                await asyncio.wait_for(tb.type(text, delay=0), timeout=10.0)
+            except (asyncio.TimeoutError, Exception) as e:
+                raise RuntimeError(f"_tb_set_text: all methods failed: {e}")
 
     async def try_click(self, selectors: List[str], timeout_ms: int = 1500) -> bool:
         for sel in selectors:
