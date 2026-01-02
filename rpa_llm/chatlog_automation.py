@@ -115,9 +115,16 @@ async def load_template_and_generate_prompt(
     talker: str,
     date_range: str,
     week: int,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    raw_file_path: Optional[Path] = None,
 ) -> str:
     """
     从 template 文件加载并生成 prompt
+    
+    支持两种占位符格式：
+    1. Python format: {talker}, {date_range}, {week}, {conversation_content}
+    2. Template format: {{group_yq}}, {{week}}, {{period_start}}, {{period_end}}, {{raw_note}}
     
     Args:
         template_path: template 文件路径
@@ -125,6 +132,9 @@ async def load_template_and_generate_prompt(
         talker: 聊天对象
         date_range: 日期范围字符串
         week: 周数
+        start: 开始日期（用于生成 period_start）
+        end: 结束日期（用于生成 period_end）
+        raw_file_path: raw 文件路径（用于生成 raw_note）
     
     Returns:
         生成的 prompt
@@ -146,13 +156,45 @@ async def load_template_and_generate_prompt(
     
     template = template_path.read_text(encoding="utf-8")
     
-    # 替换模板中的占位符
-    prompt = template.format(
-        conversation_content=raw_content,
-        talker=talker,
-        date_range=date_range,
-        week=week,
-    )
+    # 准备替换值
+    period_start = start.strftime("%Y-%m-%d") if start else date_range.split("~")[0] if "~" in date_range else date_range
+    period_end = end.strftime("%Y-%m-%d") if end else date_range.split("~")[-1] if "~" in date_range else date_range
+    period_start_dot = period_start.replace("-", ".")
+    period_end_dot = period_end.replace("-", ".")
+    raw_note = str(raw_file_path) if raw_file_path else ""
+    
+    # 先替换 {{}} 格式的占位符（模板格式）
+    replacements = {
+        "{{group_yq}}": talker,
+        "{{group}}": talker,
+        "{{week}}": str(week),
+        "{{period_start}}": period_start,
+        "{{period_end}}": period_end,
+        "{{period_start_dot}}": period_start_dot,
+        "{{period_end_dot}}": period_end_dot,
+        "{{raw_note}}": raw_note,
+        "{{conversation_content}}": raw_content,
+    }
+    
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    
+    # 再替换 {} 格式的占位符（Python format）
+    try:
+        prompt = template.format(
+            conversation_content=raw_content,
+            talker=talker,
+            date_range=date_range,
+            week=week,
+            period_start=period_start,
+            period_end=period_end,
+            period_start_dot=period_start_dot,
+            period_end_dot=period_end_dot,
+            raw_note=raw_note,
+        )
+    except KeyError:
+        # 如果有些占位符没有提供，直接使用替换后的模板
+        prompt = template
     
     return prompt
 
@@ -262,6 +304,9 @@ async def run_automation(
             talker,
             time_range,
             week,
+            start=start,
+            end=end,
+            raw_file_path=raw_path,
         )
         
         print(f"[{beijing_now_iso()}] [automation] ✓ Prompt 生成完成")
