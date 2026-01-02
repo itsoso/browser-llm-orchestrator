@@ -648,48 +648,65 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("send: pressing Control+Enter (fast path)...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 优化：使用更短的等待时间和更长的超时，平衡速度和可靠性
+        # 优化：在每次确认前，先快速检查 user_count（最可靠的信号）
+        # 这样可以避免等待 wait_for_function 超时
+        async def quick_check_sent() -> bool:
+            """快速检查是否已发送（直接查询 user_count）"""
+            try:
+                current_user_count = await self._user_count()
+                if current_user_count > user0:
+                    self._log(f"send: user_count increased ({user0} -> {current_user_count}), send confirmed")
+                    return True
+            except Exception:
+                pass
+            return False
+        
         # 立即检查（0.1秒等待，让事件触发）
         await asyncio.sleep(0.1)
         
-        # 快速确认（1.5秒超时，给足够时间让页面响应）
-        if await self._fast_send_confirm(user0, timeout_ms=1500):
+        # 优先使用快速检查（直接查询 user_count）
+        if await quick_check_sent():
+            return
+        
+        # 如果快速检查失败，使用并行确认（包含多个信号）
+        if await self._fast_send_confirm(user0, timeout_ms=2000):
             self._log("send: fast path confirmed (first attempt)")
             return
         
-        # 如果立即检查失败，再等待 0.2 秒后检查一次
-        await asyncio.sleep(0.2)
-        if await self._fast_send_confirm(user0, timeout_ms=1200):
+        # 如果并行确认也失败，再次快速检查（可能确认逻辑有延迟）
+        if await quick_check_sent():
+            return
+        
+        # 如果立即检查失败，再等待 0.3 秒后检查一次
+        await asyncio.sleep(0.3)
+        if await quick_check_sent():
+            return
+        
+        if await self._fast_send_confirm(user0, timeout_ms=1500):
             self._log("send: fast path confirmed (after short wait)")
             return
         
-        # 优化：在第二次尝试之前，先检查是否实际上已经发送了（可能确认逻辑有延迟）
-        try:
-            current_user_count = await self._user_count()
-            if current_user_count > user0:
-                self._log(f"send: user_count increased ({user0} -> {current_user_count}), send actually succeeded")
-                return
-        except Exception:
-            pass
+        # 再次快速检查
+        if await quick_check_sent():
+            return
         
         # 兜底：再按一次 Control+Enter
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
         await asyncio.sleep(0.1)
         
-        # 再次确认（1.5秒超时）
-        if await self._fast_send_confirm(user0, timeout_ms=1500):
+        # 优先使用快速检查
+        if await quick_check_sent():
+            return
+        
+        # 再次确认（2秒超时）
+        if await self._fast_send_confirm(user0, timeout_ms=2000):
             self._log("send: fast path confirmed (second attempt)")
             return
         
-        # 最后检查：可能已经发送了，但确认逻辑没有及时检测到
-        try:
-            current_user_count = await self._user_count()
-            if current_user_count > user0:
-                self._log(f"send: user_count increased after second attempt ({user0} -> {current_user_count}), send actually succeeded")
-                return
-        except Exception:
-            pass
+        # 最后快速检查
+        if await quick_check_sent():
+            return
         
         # 如果还是失败，抛出异常（让上层处理）
         raise RuntimeError("send not accepted after 2 Control+Enter attempts")
@@ -1449,6 +1466,8 @@ class ChatGPTAdapter(SiteAdapter):
             try:
                 combined_sel = ", ".join(self.ASSISTANT_MSG)
                 # 修复：wait_for_function 的正确调用方式
+                # Playwright 的 wait_for_function 签名：wait_for_function(expression, arg=None, timeout=None)
+                # 需要将参数作为关键字参数传递
                 await self.page.wait_for_function(
                     """(args) => {
                         const n0 = args.n0;
@@ -1456,7 +1475,7 @@ class ChatGPTAdapter(SiteAdapter):
                         const n = document.querySelectorAll(sel).length;
                         return n > n0;
                     }""",
-                    {"n0": n_assist0, "sel": combined_sel},
+                    arg={"n0": n_assist0, "sel": combined_sel},
                     timeout=int(assistant_wait_timeout * 1000)  # wait_for_function 使用毫秒，确保是整数
                 )
                 # 等待成功后，获取实际的 assistant_count
