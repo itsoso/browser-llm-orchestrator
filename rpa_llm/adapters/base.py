@@ -573,7 +573,7 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         if len(text) < 1000:
             try:
                 # 快速路径：直接使用 evaluate，不等待 focus，添加超时控制
-                # 优化：减少超时时间，如果超时就立即 fallback，避免长时间等待
+                # 优化：进一步减少超时时间，如果超时就立即 fallback，避免长时间等待
                 await asyncio.wait_for(
                     tb.evaluate("""(el, t) => {
                         el.focus();
@@ -588,7 +588,7 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                             el.dispatchEvent(new Event('change', {bubbles:true}));
                         }
                     }""", text),
-                    timeout=1.5  # 从 3 秒减少到 1.5 秒，加快 fallback
+                    timeout=1.0  # 从 1.5 秒减少到 1.0 秒，加快 fallback
                 )
                 return
             except (asyncio.TimeoutError, Exception):
@@ -597,20 +597,20 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         # 原有逻辑（用于长文本或快速路径失败）
         # 优化：减少 _tb_kind 的超时时间
         try:
-            kind = await asyncio.wait_for(self._tb_kind(tb), timeout=1.0)
+            kind = await asyncio.wait_for(self._tb_kind(tb), timeout=0.5)  # 从 1.0 秒减少到 0.5 秒
         except (asyncio.TimeoutError, Exception):
             kind = "unknown"
         
         # 优化：减少 focus 超时时间
         try:
-            await asyncio.wait_for(tb.focus(), timeout=0.5)  # 从 1 秒减少到 0.5 秒
+            await asyncio.wait_for(tb.focus(), timeout=0.3)  # 从 0.5 秒减少到 0.3 秒
         except (asyncio.TimeoutError, Exception):
             pass  # focus 失败不影响继续
         
         if kind == "textarea":
             # textarea 用 fill 最稳，但添加超时控制
             try:
-                await asyncio.wait_for(tb.fill(text), timeout=5.0)  # 5 秒超时
+                await asyncio.wait_for(tb.fill(text), timeout=3.0)  # 从 5 秒减少到 3 秒
             except (asyncio.TimeoutError, Exception) as e:
                 raise RuntimeError(f"_tb_set_text: fill() timeout or failed: {e}")
             return
@@ -625,12 +625,12 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                     el.dispatchEvent(new Event('input', {bubbles:true}));
                     el.dispatchEvent(new Event('change', {bubbles:true}));
                 }""", text),
-                timeout=5.0  # 5 秒超时
+                timeout=3.0  # 从 5 秒减少到 3 秒
             )
         except (asyncio.TimeoutError, Exception):
             # 最后 fallback 到 type()，但也要添加超时
             try:
-                await asyncio.wait_for(tb.type(text, delay=0), timeout=10.0)
+                await asyncio.wait_for(tb.type(text, delay=0), timeout=8.0)  # 从 10 秒减少到 8 秒
             except (asyncio.TimeoutError, Exception) as e:
                 raise RuntimeError(f"_tb_set_text: all methods failed: {e}")
 
