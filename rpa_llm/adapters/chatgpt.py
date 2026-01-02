@@ -411,75 +411,39 @@ class ChatGPTAdapter(SiteAdapter):
 
     async def _assistant_count(self) -> int:
         """
-        获取 assistant 消息数量，使用并行执行优化性能。
-        如果所有选择器都失败，返回 0。
-        优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
+        获取 assistant 消息数量，使用 JS evaluate 直接查询（P0优化）。
+        避免 Playwright locator.count() + asyncio.wait_for 导致的 Future exception。
         """
-        async def try_selector(sel: str) -> Optional[int]:
-            """尝试单个选择器，返回计数或 None"""
-            try:
-                # 优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
-                return await asyncio.wait_for(
-                    self.page.locator(sel).count(),
-                    timeout=1.5
-                )
-            except (asyncio.TimeoutError, Exception):
-                return None
-        
-        # 并行尝试所有选择器，取第一个成功的结果
-        tasks = [try_selector(sel) for sel in self.ASSISTANT_MSG]
-        # 优化：添加总超时保护，整个方法最多等待2秒
+        # P0优化：使用 JS evaluate 直接查询，避免 Playwright actionability 等待和 Future exception
+        combined_selector = ", ".join(self.ASSISTANT_MSG)
         try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=2.0
+            count = await self.page.evaluate(
+                """(sel) => {
+                    return document.querySelectorAll(sel).length;
+                }""",
+                combined_selector
             )
-        except asyncio.TimeoutError:
-            # 如果总超时，返回0（表示未找到）
+            return count if isinstance(count, int) else 0
+        except Exception:
             return 0
-        
-        # 找到第一个成功的结果（非 None，非异常）
-        for result in results:
-            if result is not None and not isinstance(result, Exception):
-                return result
-        
-        return 0
 
     async def _user_count(self) -> int:
         """
-        获取用户消息数量，使用并行执行优化性能。
-        如果所有选择器都失败，返回 0。
-        优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
+        获取用户消息数量，使用 JS evaluate 直接查询（P0优化）。
+        避免 Playwright locator.count() + asyncio.wait_for 导致的 Future exception。
         """
-        async def try_selector(sel: str) -> Optional[int]:
-            """尝试单个选择器，返回计数或 None"""
-            try:
-                # 优化：减少单个选择器超时，从3秒减少到1.5秒，提升响应速度
-                return await asyncio.wait_for(
-                    self.page.locator(sel).count(),
-                    timeout=1.5
-                )
-            except (asyncio.TimeoutError, Exception):
-                return None
-        
-        # 并行尝试所有选择器，取第一个成功的结果
-        tasks = [try_selector(sel) for sel in self.USER_MSG]
-        # 优化：添加总超时保护，整个方法最多等待2秒
+        # P0优化：使用 JS evaluate 直接查询，避免 Playwright actionability 等待和 Future exception
+        combined_selector = ", ".join(self.USER_MSG)
         try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=2.0
+            count = await self.page.evaluate(
+                """(sel) => {
+                    return document.querySelectorAll(sel).length;
+                }""",
+                combined_selector
             )
-        except asyncio.TimeoutError:
-            # 如果总超时，返回0（表示未找到）
+            return count if isinstance(count, int) else 0
+        except Exception:
             return 0
-        
-        # 找到第一个成功的结果（非 None，非异常）
-        for result in results:
-            if result is not None and not isinstance(result, Exception):
-                return result
-        
-        return 0
 
     async def _last_assistant_text(self) -> str:
         for sel in self.ASSISTANT_MSG:
@@ -520,36 +484,29 @@ class ChatGPTAdapter(SiteAdapter):
         return ""
 
     async def _is_generating(self) -> bool:
-        # 修复：使用并行检查，减少等待时间，避免 Future exception
-        # 优化：显式捕获 TimeoutError，避免 Future exception
-        async def check_stop(sel: str) -> bool:
-            try:
-                loc = self.page.locator(sel).first
-                if await loc.count() > 0:
-                    # 修复：使用 wait_for 而不是 is_visible，但设置短超时，避免 Future exception
-                    try:
-                        await loc.wait_for(state="visible", timeout=300)  # 300ms 超时
-                        return True
-                    except Exception:
-                        return False
-            except Exception:
-                pass
-            return False
-        
-        # 只检查前 2 个选择器，并行执行，总超时 0.5 秒
+        """
+        检查是否正在生成，使用 JS evaluate 直接查询（P0优化）。
+        避免 Playwright locator + wait_for 导致的 Future exception。
+        """
+        # P0优化：使用 JS evaluate 直接查询，避免 Playwright actionability 等待和 Future exception
+        # 组合所有 STOP_BTN 选择器，用 OR 逻辑查询
+        combined_selector = ", ".join(self.STOP_BTN)
         try:
-            tasks = [check_stop(sel) for sel in self.STOP_BTN[:2]]
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=0.5
+            has_stop = await self.page.evaluate(
+                """(sel) => {
+                    const els = document.querySelectorAll(sel);
+                    for (let el of els) {
+                        if (el.offsetParent !== null) {  // 检查是否可见
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                combined_selector
             )
-            for result in results:
-                if isinstance(result, bool) and result:
-                    return True
-        except (asyncio.TimeoutError, Exception):
-            # 显式捕获 TimeoutError，避免 Future exception
-            pass
-        return False
+            return has_stop if isinstance(has_stop, bool) else False
+        except Exception:
+            return False
 
     async def _arm_input_events(self, tb: Locator) -> None:
         """
@@ -565,6 +522,75 @@ class ChatGPTAdapter(SiteAdapter):
                 await self.page.keyboard.press("Backspace")
             except Exception:
                 pass
+
+    async def _fast_send_confirm(self, user0: int, timeout_ms: int = 1500) -> bool:
+        """
+        P0优化：快速确认发送成功，使用 page.wait_for_function（最便宜、最快）。
+        避免复杂的 _user_count() + _assistant_count() 并行检查导致的 Future exception。
+        
+        Args:
+            user0: 发送前的用户消息数量
+            timeout_ms: 超时时间（毫秒）
+        
+        Returns:
+            True 如果确认发送成功，False 否则
+        """
+        # A) 输入框清空（最可靠、最快）
+        try:
+            await self.page.wait_for_function(
+                """() => {
+                  const el = document.querySelector('#prompt-textarea');
+                  if (!el) return false;
+                  const t = (el.innerText || el.textContent || '').trim();
+                  return t.length === 0;
+                }""",
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            pass
+
+        # B) user message 数 +1（强信号）
+        try:
+            combined_user_sel = ", ".join(self.USER_MSG)
+            await self.page.wait_for_function(
+                """(u0, sel) => {
+                  const n = document.querySelectorAll(sel).length;
+                  return n > u0;
+                }""",
+                user0,
+                combined_user_sel,
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            return False
+
+    async def _trigger_send_fast(self, user0: int) -> None:
+        """
+        P0优化：快路径发送，使用 page.keyboard.press("Control+Enter") + _fast_send_confirm。
+        避免 Locator.press() 的 actionability 等待和复杂的确认逻辑。
+        
+        Args:
+            user0: 发送前的用户消息数量
+        """
+        # 使用 page.keyboard.press，避免 Locator.press() 的 actionability 等待
+        await self.page.keyboard.press("Control+Enter")
+        
+        # 快速确认（1.5秒超时）
+        if await self._fast_send_confirm(user0, timeout_ms=1500):
+            return
+        
+        # 兜底：再按一次 Control+Enter
+        self._log("send: first Control+Enter not confirmed, trying again...")
+        await self.page.keyboard.press("Control+Enter")
+        
+        # 再次确认（1.5秒超时）
+        if await self._fast_send_confirm(user0, timeout_ms=1500):
+            return
+        
+        # 如果还是失败，抛出异常（让上层处理）
+        raise RuntimeError("send not accepted after 2 Control+Enter attempts")
 
     async def _send_prompt(self, prompt: str) -> None:
         """
@@ -646,30 +672,69 @@ class ChatGPTAdapter(SiteAdapter):
                     # 使用 "attached" 状态更宽松，因为元素可能暂时不可见但已附加到 DOM
                     await tb.wait_for(state="attached", timeout=10000)
                     
-                    # 优化：在 Thinking 模式渲染时，主线程可能太忙，先给页面一口喘息的机会
-                    await asyncio.sleep(0.5)  # 等待 500ms，让页面稳定
+                    # P0优化：使用条件等待替代固定 sleep
+                    # 等待 textbox 可见且可交互（最多 1 秒）
+                    try:
+                        await tb.wait_for(state="visible", timeout=1000)
+                    except Exception:
+                        pass  # 超时不影响继续
                     
                     # 优化：使用统一的清空方法，优先用户等价操作（Meta/Control+A → Backspace）
                     # 对于短 prompt，只需清空一次即可，不需要多次循环
                     await self._tb_clear(tb)
-                    await asyncio.sleep(0.1)  # 短暂等待，让清空生效
                     
-                    # 验证是否真的清空了（使用统一的获取方法）
-                    check_empty = await self._tb_get_text(tb)
-                    if not check_empty.strip():
+                    # P0优化：等待 textbox 清空（条件等待，最多 0.5 秒）
+                    try:
+                        await self.page.wait_for_function(
+                            """() => {
+                              const el = document.querySelector('#prompt-textarea');
+                              if (!el) return false;
+                              const t = (el.innerText || el.textContent || '').trim();
+                              return t.length === 0;
+                            }""",
+                            timeout=500
+                        )
                         self._log("send: textbox cleared successfully")
-                    else:
-                        # 如果还有内容，再清空一次（最多2次）
-                        self._log(f"send: textbox still has content after first clear, retrying...")
-                        await self._tb_clear(tb)
-                        await asyncio.sleep(0.1)
-                        final_check = await self._tb_get_text(tb)
-                        if final_check.strip():
-                            self._log(f"send: warning - textbox still has content after clear: '{final_check[:50]}...'")
+                    except Exception:
+                        # 如果 wait_for_function 超时，再检查一次
+                        check_empty = await self._tb_get_text(tb)
+                        if not check_empty.strip():
+                            self._log("send: textbox cleared successfully (after timeout check)")
                         else:
-                            self._log("send: textbox cleared successfully (after retry)")
+                            # 如果还有内容，再清空一次（最多2次）
+                            self._log(f"send: textbox still has content after first clear, retrying...")
+                            await self._tb_clear(tb)
+                            try:
+                                await self.page.wait_for_function(
+                                    """() => {
+                                      const el = document.querySelector('#prompt-textarea');
+                                      if (!el) return false;
+                                      const t = (el.innerText || el.textContent || '').trim();
+                                      return t.length === 0;
+                                    }""",
+                                    timeout=300
+                                )
+                                self._log("send: textbox cleared successfully (after retry)")
+                            except Exception:
+                                final_check = await self._tb_get_text(tb)
+                                if final_check.strip():
+                                    self._log(f"send: warning - textbox still has content after clear: '{final_check[:50]}...'")
+                                else:
+                                    self._log("send: textbox cleared successfully (after retry)")
                     
-                    await asyncio.sleep(0.5)  # 等待 React 状态完全更新
+                    # P0优化：等待 React 状态更新（条件等待，最多 0.3 秒）
+                    # 检查 textbox 是否可交互（disabled 属性消失）
+                    try:
+                        await self.page.wait_for_function(
+                            """() => {
+                              const el = document.querySelector('#prompt-textarea');
+                              if (!el) return false;
+                              return !el.hasAttribute('disabled') && el.offsetParent !== null;
+                            }""",
+                            timeout=300
+                        )
+                    except Exception:
+                        pass  # 超时不影响继续
                 except Exception as e:
                     # 记录详细错误信息，包括异常类型、消息和堆栈信息
                     import traceback
@@ -1122,95 +1187,32 @@ class ChatGPTAdapter(SiteAdapter):
         
         self._log("send: triggering send...")
         send_phase_start = time.time()
-        send_phase_max_s = float(os.environ.get("CHATGPT_SEND_PHASE_MAX_S", "8.0"))
-
-        # 优化：提取辅助方法，减少重复代码
-        # 优化：使用并行检查，加快检测速度
-        async def check_if_sent(method_name: str) -> bool:
-            """检查是否已经发送成功（多重检查：user_count、textbox cleared、stop button，并行执行）"""
-            try:
-                # 优化：并行检查多个信号，谁先成功就返回
-                async def check_user_count():
-                    try:
-                        user_count_now = await asyncio.wait_for(self._user_count(), timeout=0.8)
-                        if user_count_now > user_count_before_send:
-                            return f"user_count={user_count_now}"
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    return None
-                
-                async def check_textbox_cleared():
-                    try:
-                        tb_loc = self.page.locator('div[id="prompt-textarea"]').first
-                        if await tb_loc.count() > 0:
-                            text_now = await asyncio.wait_for(self._tb_get_text(tb_loc), timeout=0.3)
-                            if text_now is not None and text_now.strip() == "":
-                                return "textbox_cleared"
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    return None
-                
-                async def check_stop_button():
-                    try:
-                        if await asyncio.wait_for(self._is_generating(), timeout=0.5):
-                            return "stop_button_visible"
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    return None
-                
-                # 并行执行所有检查，总超时 1.0 秒
-                results = await asyncio.wait_for(
-                    asyncio.gather(
-                        check_user_count(),
-                        check_textbox_cleared(),
-                        check_stop_button(),
-                        return_exceptions=True
-                    ),
-                    timeout=1.0
-                )
-                
-                # 检查结果，优先返回 user_count（最可靠）
-                for i, result in enumerate(results):
-                    if isinstance(result, str) and result:
-                        signal_names = ["user_count", "textbox_cleared", "stop_button"]
-                        self._log(f"send: confirmed sent via {method_name} ({signal_names[i]}: {result})")
-                        return True
-            except (asyncio.TimeoutError, Exception):
-                pass
-            return False
-
-        # 优化：优先使用 Control+Enter（日志证明这是救世主，更可靠）
-        # 很多时候 Enter 只是换行，Ctrl+Enter 才是强制提交
-        # 步骤 1: 优先尝试 Control+Enter（最可靠），立即检查，不等待
+        
+        # P0优化：使用快路径发送（page.keyboard.press + wait_for_function 确认）
+        # 这比 Locator.press() + 复杂并行检查快得多，且避免 Future exception
         try:
-            self._log("send: trying Control+Enter first (most reliable)...")
-            await tb.press("Control+Enter", timeout=2000)
-            self._log("send: Control+Enter pressed")
-            # 优化：立即检查，不等待，减少延迟
-            await asyncio.sleep(0.1)  # 最小等待，让事件触发
-            if await check_if_sent("Control+Enter"):
-                return
-            # 如果立即检查失败，再等待 0.2 秒后检查一次
-            await asyncio.sleep(0.2)
-            if await check_if_sent("Control+Enter (after short wait)"):
-                return
-        except Exception:
+            self._log("send: using fast path (Control+Enter + wait_for_function)...")
+            await self._trigger_send_fast(user_count_before_send)
+            send_duration = time.time() - send_phase_start
+            self._log(f"send: fast path succeeded ({send_duration:.2f}s)")
+            return
+        except Exception as fast_err:
+            self._log(f"send: fast path failed: {fast_err}, falling back to legacy path...")
+            # 快路径失败，fallback 到原有逻辑（但简化）
             pass
-
+        
+        # Fallback：如果快路径失败，使用简化的按钮点击逻辑
+        send_phase_max_s = float(os.environ.get("CHATGPT_SEND_PHASE_MAX_S", "8.0"))
         if time.time() - send_phase_start >= send_phase_max_s:
-            # 在跳过按钮前，最后检查一次是否已经发送
-            if await check_if_sent("before skipping buttons"):
-                return
             self._log(
                 f"send: send phase reached {send_phase_max_s:.1f}s, skipping button attempts to reduce latency"
             )
             return
-
-        # 步骤 3: 最后才找按钮 (最慢，最容易失败)
-        # 只有当前面两个都不行时，才去 DOM 里挖按钮
-        # 修复：在点击按钮之前，检查是否已经发送成功（防止重复点击）
-        if await check_if_sent("before button attempts"):
-            return
+        
+        # 简化版检查函数（用于 fallback）
+        async def check_sent_simple() -> bool:
+            """简化版发送确认，用于 fallback"""
+            return await self._fast_send_confirm(user_count_before_send, timeout_ms=500)
         
         for send_sel in self.SEND_BTN:
             if time.time() - send_phase_start >= send_phase_max_s:
@@ -1220,11 +1222,12 @@ class ChatGPTAdapter(SiteAdapter):
                 return
             
             # 修复：在每次循环开始时，检查是否已经发送成功
-            if await check_if_sent(f"before button {send_sel}"):
+            if await check_sent_simple():
+                self._log(f"send: confirmed sent before button {send_sel}")
                 return
             
             try:
-                btn = frame.locator(send_sel).first
+                btn = self.page.locator(send_sel).first
                 # 修复：is_visible() 不接受 timeout 参数，改为 wait_for(state="visible")
                 if await btn.count() > 0:
                     # 修复：在点击之前，显式检查按钮是否是"停止生成"按钮
@@ -1242,7 +1245,8 @@ class ChatGPTAdapter(SiteAdapter):
                         pass  # 检查失败不影响继续
                     
                     # 修复：在点击之前，再次检查是否已经发送成功
-                    if await check_if_sent(f"just before clicking {send_sel}"):
+                    if await check_sent_simple():
+                        self._log(f"send: confirmed sent just before clicking {send_sel}")
                         return
                     
                     await btn.wait_for(state="visible", timeout=1000)
@@ -1250,8 +1254,9 @@ class ChatGPTAdapter(SiteAdapter):
                     await btn.click(timeout=3000)
                     self._log(f"send: clicked send button {send_sel}")
                     # 按钮点击后也检查是否发送成功
-                    await asyncio.sleep(0.3)
-                    if await check_if_sent(f"button ({send_sel})"):
+                    await asyncio.sleep(0.2)
+                    if await check_sent_simple():
+                        self._log(f"send: confirmed sent after button {send_sel}")
                         return
             except Exception:
                 continue
