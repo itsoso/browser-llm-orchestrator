@@ -2186,9 +2186,9 @@ class ChatGPTAdapter(SiteAdapter):
         # 优化：先尝试高频轮询（最多 2.0 秒），这样可以更快检测到新消息
         # 关键修复：在轮询过程中，定期检测 thinking 状态
         n_assist1 = n_assist0
-            polling_success = False
-            thinking_detected_during_polling = False
-            for attempt in range(200):  # 2.0 秒 / 0.01 秒 = 200 次（增加轮询次数）
+        polling_success = False
+        thinking_detected_during_polling = False
+        for attempt in range(200):  # 2.0 秒 / 0.01 秒 = 200 次（增加轮询次数）
                 try:
                     # 每 50 次检查（0.5 秒）检测一次 thinking 状态
                     if attempt > 0 and attempt % 50 == 0:
