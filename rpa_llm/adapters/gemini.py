@@ -695,12 +695,32 @@ class GeminiAdapter(SiteAdapter):
 
         async def _ready_check() -> bool:
             # 修复：不仅尝试快速路径，也尝试完整路径，提高检测成功率
-            await self._dismiss_popups()
-            tb = await self._fast_find_textbox()
+            try:
+                await self._dismiss_popups()
+            except Exception as e:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during dismiss_popups: {e}") from e
+                pass  # 其他异常不影响继续
+            
+            try:
+                tb = await self._fast_find_textbox()
+            except Exception as e:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during _fast_find_textbox: {e}") from e
+                tb = None
+            
             if tb:
                 return True
             # 如果快速路径失败，尝试完整路径（包括多 frame 扫描）
-            tb = await self._find_textbox()
+            try:
+                tb = await self._find_textbox()
+            except Exception as e:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during _find_textbox: {e}") from e
+                tb = None
             return tb is not None
 
         await self.manual_checkpoint(
