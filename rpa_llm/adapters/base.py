@@ -131,8 +131,9 @@ class SiteAdapter(ABC):
         )
 
         # Default timeouts to avoid hanging forever
+        # 优化：增加超时时间，特别是导航超时，避免首次启动时网络慢导致失败
         self._context.set_default_timeout(30_000)
-        self._context.set_default_navigation_timeout(45_000)
+        self._context.set_default_navigation_timeout(60_000)  # 从 45 秒增加到 60 秒，给首次启动更多时间
 
         # Reduce obvious webdriver signal (best-effort)
         await self._context.add_init_script(
@@ -295,10 +296,31 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         if not (current_url and current_url.startswith(self.base_url)):
             self._perf["goto"]["start_utc"] = utc_now_iso()
             t0 = time.perf_counter()
-            await self._page.goto(self.base_url, wait_until="commit", timeout=30000)
-            t1 = time.perf_counter()
-            self._perf["goto"]["end_utc"] = utc_now_iso()
-            self._perf["goto"]["duration_s"] = max(0.0, t1 - t0)
+            # 优化：增加超时时间，从 30 秒增加到 60 秒，并添加重试机制
+            # 首次启动时网络可能较慢，需要更长的超时时间
+            max_retries = 2  # 最多重试 2 次
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    # 第一次尝试使用 60 秒超时，重试时使用 45 秒
+                    timeout_ms = 60_000 if attempt == 0 else 45_000
+                    await self._page.goto(self.base_url, wait_until="commit", timeout=timeout_ms)
+                    t1 = time.perf_counter()
+                    self._perf["goto"]["end_utc"] = utc_now_iso()
+                    self._perf["goto"]["duration_s"] = max(0.0, t1 - t0)
+                    if attempt > 0:
+                        print(f"[{beijing_now_iso()}] [{self.site_id}] goto succeeded after {attempt} retries", flush=True)
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_retries:
+                        # 重试前等待一下，避免立即重试
+                        wait_time = 2.0 * (attempt + 1)  # 2秒, 4秒
+                        print(f"[{beijing_now_iso()}] [{self.site_id}] goto failed (attempt {attempt + 1}/{max_retries + 1}): {e}, retrying in {wait_time}s...", flush=True)
+                        await asyncio.sleep(wait_time)
+                    else:
+                        # 最后一次尝试失败，抛出异常
+                        raise RuntimeError(f"goto failed after {max_retries + 1} attempts: {last_error}") from last_error
         else:
             try:
                 print(
