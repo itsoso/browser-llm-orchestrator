@@ -574,6 +574,7 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             try:
                 # 快速路径：直接使用 evaluate，不等待 focus，添加超时控制
                 # 优化：进一步减少超时时间，如果超时就立即 fallback，避免长时间等待
+                # 优化：对于 contenteditable，使用更可靠的方法（ProseMirror 兼容）
                 await asyncio.wait_for(
                     tb.evaluate("""(el, t) => {
                         el.focus();
@@ -582,13 +583,27 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                             el.dispatchEvent(new Event('input', {bubbles:true}));
                             el.dispatchEvent(new Event('change', {bubbles:true}));
                         } else if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                            // 优化：对于 ProseMirror，先清空再设置
+                            el.innerText = '';
+                            el.textContent = '';
+                            // 尝试 execCommand（更接近真实输入）
                             const ok = document.execCommand && document.execCommand('insertText', false, t);
-                            if (!ok) el.innerText = t;
+                            if (!ok) {
+                                // execCommand 失败，直接设置 innerText
+                                el.innerText = t;
+                                el.textContent = t;
+                            }
+                            // 触发所有必要的事件
                             el.dispatchEvent(new Event('input', {bubbles:true}));
                             el.dispatchEvent(new Event('change', {bubbles:true}));
+                            el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType: 'insertText', data: t}));
+                            // 强制更新（ProseMirror 可能需要）
+                            if (el.dispatchEvent) {
+                                el.dispatchEvent(new Event('compositionupdate', {bubbles:true}));
+                            }
                         }
                     }""", text),
-                    timeout=1.0  # 从 1.5 秒减少到 1.0 秒，加快 fallback
+                    timeout=0.8  # 从 1.0 秒减少到 0.8 秒，加快 fallback
                 )
                 return
             except (asyncio.TimeoutError, Exception):
@@ -616,21 +631,36 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             return
 
         # contenteditable：用 insertText 更接近真实输入；失败再 innerText
+        # 优化：对于 ProseMirror，先清空再设置，并触发所有必要事件
         try:
             await asyncio.wait_for(
                 tb.evaluate("""(el, t) => {
                     el.focus();
+                    // 优化：先清空（ProseMirror 兼容）
+                    el.innerText = '';
+                    el.textContent = '';
+                    // 尝试 execCommand（更接近真实输入）
                     const ok = document.execCommand && document.execCommand('insertText', false, t);
-                    if (!ok) el.innerText = t;
+                    if (!ok) {
+                        // execCommand 失败，直接设置 innerText
+                        el.innerText = t;
+                        el.textContent = t;
+                    }
+                    // 触发所有必要的事件（ProseMirror 兼容）
                     el.dispatchEvent(new Event('input', {bubbles:true}));
                     el.dispatchEvent(new Event('change', {bubbles:true}));
+                    el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType: 'insertText', data: t}));
+                    // 强制更新（ProseMirror 可能需要）
+                    if (el.dispatchEvent) {
+                        el.dispatchEvent(new Event('compositionupdate', {bubbles:true}));
+                    }
                 }""", text),
-                timeout=3.0  # 从 5 秒减少到 3 秒
+                timeout=2.5  # 从 3.0 秒减少到 2.5 秒
             )
         except (asyncio.TimeoutError, Exception):
             # 最后 fallback 到 type()，但也要添加超时
             try:
-                await asyncio.wait_for(tb.type(text, delay=0), timeout=8.0)  # 从 10 秒减少到 8 秒
+                await asyncio.wait_for(tb.type(text, delay=0), timeout=6.0)  # 从 8.0 秒减少到 6.0 秒
             except (asyncio.TimeoutError, Exception) as e:
                 raise RuntimeError(f"_tb_set_text: all methods failed: {e}")
 
