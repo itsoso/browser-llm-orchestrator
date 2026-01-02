@@ -824,6 +824,28 @@ class GeminiAdapter(SiteAdapter):
         if reason:
             return f"enter:{reason}"
 
+        # 修复：在点击按钮之前，再次检查是否已经发送成功（防止重复点击）
+        # 因为 Enter 可能已经成功，但检测没有及时捕获到
+        try:
+            # 快速检查：textbox 是否已清空
+            current_text = (await self._tb_get_text(tb)).strip()
+            if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
+                self._log("send: detected textbox cleared before button click, send already successful")
+                return "enter:detected_before_click"
+            
+            # 快速检查：stop button 是否出现
+            if await self._is_generating():
+                self._log("send: detected stop button before button click, send already successful")
+                return "enter:detected_stop_before_click"
+            
+            # 快速检查：assistant_count 是否增加
+            assist_cnt_now = await asyncio.wait_for(self._assistant_count(), timeout=0.5)
+            if assist_cnt_now > assist_cnt0:
+                self._log(f"send: detected assistant_count increased ({assist_cnt0}->{assist_cnt_now}) before button click, send already successful")
+                return "enter:detected_assistant_count_before_click"
+        except Exception:
+            pass  # 检查失败不影响继续尝试点击
+
         # B) Click send (short, check disabled)
         for sel in self.SEND_BTN:
             if time.time() > deadline:
@@ -834,6 +856,34 @@ class GeminiAdapter(SiteAdapter):
                 if await btn.count() == 0:
                     continue
 
+                # 修复：在点击之前，显式检查按钮是否是"停止生成"按钮
+                # 因为即使选择器过滤了，按钮状态可能已经改变
+                try:
+                    aria_label = await btn.get_attribute("aria-label") or ""
+                    btn_class = await btn.get_attribute("class") or ""
+                    # 检查是否是停止按钮
+                    if "停止" in aria_label or "Stop" in aria_label or "stop" in aria_label.lower():
+                        self._log(f"send: button {sel} is a stop button (aria-label={aria_label}), skipping")
+                        continue
+                    if "stop" in btn_class.lower():
+                        self._log(f"send: button {sel} has stop class ({btn_class}), skipping")
+                        continue
+                except Exception:
+                    pass  # 检查失败不影响继续
+
+                # 修复：在点击之前，再次检查是否已经发送成功（防止在检查按钮状态期间已经发送）
+                try:
+                    current_text = (await self._tb_get_text(tb)).strip()
+                    if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
+                        self._log("send: detected textbox cleared during button check, send already successful")
+                        return "enter:detected_during_button_check"
+                    
+                    if await self._is_generating():
+                        self._log("send: detected stop button during button check, send already successful")
+                        return "enter:detected_stop_during_button_check"
+                except Exception:
+                    pass
+
                 # quick disabled check (修复：减少等待时间)
                 t0 = time.time()
                 max_wait = min(self.SEND_ENABLE_WAIT_S, 0.5)  # 最多等待 0.5 秒
@@ -843,6 +893,19 @@ class GeminiAdapter(SiteAdapter):
                     if aria_dis != "true" and dis_attr is None:
                         break
                     await asyncio.sleep(0.1)
+
+                # 修复：在点击之前，最后一次检查是否已经发送成功
+                try:
+                    current_text = (await self._tb_get_text(tb)).strip()
+                    if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
+                        self._log("send: detected textbox cleared just before click, send already successful")
+                        return "enter:detected_just_before_click"
+                    
+                    if await self._is_generating():
+                        self._log("send: detected stop button just before click, send already successful")
+                        return "enter:detected_stop_just_before_click"
+                except Exception:
+                    pass
 
                 # click short timeout; do not wrap with asyncio.wait_for
                 await btn.click(timeout=self.SEND_CLICK_TIMEOUT_MS, force=True, no_wait_after=True)
@@ -860,15 +923,39 @@ class GeminiAdapter(SiteAdapter):
                 continue
 
         # C) JS click fallback (very limited)
+        # 修复：在 JS click 之前，也要检查是否已经发送成功
         try:
+            # 先检查是否已经发送成功
+            current_text = (await self._tb_get_text(tb)).strip()
+            if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
+                self._log("send: detected textbox cleared before JS click, send already successful")
+                return "enter:detected_before_js_click"
+            
+            if await self._is_generating():
+                self._log("send: detected stop button before JS click, send already successful")
+                return "enter:detected_stop_before_js_click"
+            
             btn = self.page.locator("button.send-button").first
             if await btn.count() > 0:
+                # 检查按钮是否是停止按钮
+                try:
+                    aria_label = await btn.get_attribute("aria-label") or ""
+                    if "停止" in aria_label or "Stop" in aria_label or "stop" in aria_label.lower():
+                        self._log(f"send: JS click target is a stop button (aria-label={aria_label}), skipping")
+                        raise RuntimeError("send not accepted (JS click target is stop button)")
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+                
                 h = await btn.element_handle()
                 if h:
                     await h.evaluate("(el)=>el.click()")
                     reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=1.2)
                     if reason:
                         return f"js_click:{reason}"
+        except RuntimeError:
+            raise
         except Exception:
             pass
 
