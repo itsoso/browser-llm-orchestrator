@@ -751,32 +751,32 @@ class GeminiAdapter(SiteAdapter):
                     pass
                 return None
             
-            # 并行执行所有检查
+            # 并行执行所有检查（显式管理任务，避免 timeout 未回收导致的 Future warning）
+            tasks = [
+                asyncio.create_task(check_textbox_clear()),
+                asyncio.create_task(check_stop_button()),
+                asyncio.create_task(check_assistant_count()),
+            ]
             try:
                 results = await asyncio.wait_for(
-                    asyncio.gather(
-                        check_textbox_clear(),
-                        check_stop_button(),
-                        check_assistant_count(),
-                        return_exceptions=True
-                    ),
-                    timeout=min(0.6, timeout_s - (time.time() - t0))  # 每次检查最多 0.6 秒（从 0.8s 减少）
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=min(0.6, timeout_s - (time.time() - t0))  # 每次检查最多 0.6 秒
                 )
-                
-                # 检查结果，优先返回 textbox_clear（最可靠）
-                for result in results:
-                    if isinstance(result, str) and result:
-                        # 优先返回 textbox_clear
-                        if "textbox_clear" in result:
-                            return result
-                
-                # 如果没有 textbox_clear，返回其他成功的信号
-                for result in results:
-                    if isinstance(result, str) and result:
-                        return result
             except (asyncio.TimeoutError, Exception):
-                # 并行检查超时，继续下一轮
-                pass
+                for t in tasks:
+                    t.cancel()
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # 检查结果，优先返回 textbox_clear（最可靠）
+            for result in results:
+                if isinstance(result, str) and result:
+                    if "textbox_clear" in result:
+                        return result
+
+            # 如果没有 textbox_clear，返回其他成功的信号
+            for result in results:
+                if isinstance(result, str) and result:
+                    return result
 
             await asyncio.sleep(check_interval)
 
@@ -784,13 +784,49 @@ class GeminiAdapter(SiteAdapter):
 
     async def _trigger_send(self, tb: Locator, before_len: int, assist_cnt0: int, assist_hash0: str) -> str:
         """
-        Try send with bounded latency. Prefer keyboard Enter (page-level), then short click.
+        Try send with bounded latency. Prefer Control+Enter (most reliable), then Enter, then short click.
         """
         deadline = time.time() + self.SEND_HARD_CAP_S
 
-        # A) Enter first (keyboard, not locator.press)
+        # A) Control+Enter first (most reliable, like ChatGPT)
+        # 优化：优先使用 Control+Enter（更可靠，避免 Enter 只是换行）
+        self._log("send: trying Control+Enter first (most reliable)...")
+        try:
+            await tb.focus(timeout=2000)
+            await self.page.keyboard.press("Control+Enter")
+            self._log("send: Control+Enter pressed")
+            
+            # 优化：立即检查，不等待，减少延迟
+            await asyncio.sleep(0.1)  # 最小等待，让事件触发
+            
+            # 快速检查：textbox 是否已清空（最可靠的信号）
+            try:
+                current_text = (await self._tb_get_text(tb)).strip()
+                if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
+                    self._log("send: fast confirm - Control+Enter worked (textbox cleared)!")
+                    return "control_enter:fast_confirm_textbox_cleared"
+            except Exception:
+                pass
+            
+            # 快速检查：stop button 是否出现
+            try:
+                if await self._is_generating():
+                    self._log("send: fast confirm - Control+Enter worked (stop button visible)!")
+                    return "control_enter:fast_confirm_stop"
+            except Exception:
+                pass
+            
+            # 如果快速检查失败，再等待 0.2 秒后检查一次
+            await asyncio.sleep(0.2)
+            reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=0.5)
+            if reason:
+                return f"control_enter:{reason}"
+        except Exception as e:
+            self._log(f"send: Control+Enter(keyboard) error: {type(e).__name__}: {str(e)[:120]}")
+
+        # B) Enter as fallback (keyboard, not locator.press)
         # 优化（P0）：Enter 后立即检查输入框是否变空，避免等待按钮超时
-        self._log("send: trying Enter first (keyboard)")
+        self._log("send: trying Enter as fallback (keyboard)")
         try:
             await tb.focus(timeout=2000)
             await self.page.keyboard.press("Enter")
@@ -859,7 +895,7 @@ class GeminiAdapter(SiteAdapter):
         except Exception:
             pass  # 检查失败不影响继续尝试点击
 
-        # B) Click send (short, check disabled)
+        # C) Click send (short, check disabled)
         for sel in self.SEND_BTN:
             if time.time() > deadline:
                 break
@@ -935,7 +971,7 @@ class GeminiAdapter(SiteAdapter):
                     return f"click_timeout_but_sent:{sel}:{reason}"
                 continue
 
-        # C) JS click fallback (very limited)
+        # D) JS click fallback (very limited)
         # 修复：在 JS click 之前，也要检查是否已经发送成功
         try:
             # 先检查是否已经发送成功

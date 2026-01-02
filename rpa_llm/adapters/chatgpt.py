@@ -1181,37 +1181,21 @@ class ChatGPTAdapter(SiteAdapter):
 
         # 优化：优先使用 Control+Enter（日志证明这是救世主，更可靠）
         # 很多时候 Enter 只是换行，Ctrl+Enter 才是强制提交
-        # 步骤 1: 优先尝试 Control+Enter（最可靠）
+        # 步骤 1: 优先尝试 Control+Enter（最可靠），立即检查，不等待
         try:
             self._log("send: trying Control+Enter first (most reliable)...")
-            await tb.press("Control+Enter", timeout=3000)
-            await asyncio.sleep(0.15)  # 减少等待时间，从 0.2s 减少到 0.15s
+            await tb.press("Control+Enter", timeout=2000)
             self._log("send: Control+Enter pressed")
+            # 优化：立即检查，不等待，减少延迟
+            await asyncio.sleep(0.1)  # 最小等待，让事件触发
             if await check_if_sent("Control+Enter"):
                 return
-        except Exception:
-            pass
-
-        # 快速检查 Control+Enter 是否生效（减少等待时间）
-        await asyncio.sleep(0.2)  # 从 0.3s 减少到 0.2s
-        if await check_if_sent("Control+Enter (after wait)"):
-            return
-
-        # 步骤 2: 如果 Control+Enter 没成功，尝试 Enter（作为备选）
-        try:
-            self._log("send: trying Enter as fallback...")
-            await tb.press("Enter", timeout=3000)
-            self._log("send: Enter pressed")
-            await asyncio.sleep(0.15)  # 减少等待时间，从 0.2s 减少到 0.15s
-            if await check_if_sent("Enter"):
+            # 如果立即检查失败，再等待 0.2 秒后检查一次
+            await asyncio.sleep(0.2)
+            if await check_if_sent("Control+Enter (after short wait)"):
                 return
         except Exception:
             pass
-
-        # 快速检查 Enter 是否生效
-        await asyncio.sleep(0.2)  # 从 0.3s 减少到 0.2s
-        if await check_if_sent("Enter (after wait)"):
-            return
 
         if time.time() - send_phase_start >= send_phase_max_s:
             # 在跳过按钮前，最后检查一次是否已经发送
@@ -1371,6 +1355,16 @@ class ChatGPTAdapter(SiteAdapter):
                         return await asyncio.wait_for(self._assistant_count(), timeout=1.0)
                     except (asyncio.TimeoutError, Exception):
                         return None
+
+                async def check_assistant_selector():
+                    try:
+                        # Use nth(n_assist0) to wait for the next assistant message.
+                        sel = self.ASSISTANT_MSG[0]
+                        loc = self.page.locator(sel).nth(n_assist0)
+                        await loc.wait_for(state="visible", timeout=800)
+                        return "assistant_selector"
+                    except (asyncio.TimeoutError, Exception):
+                        return None
                 
                 async def check_stop_button():
                     try:
@@ -1405,6 +1399,7 @@ class ChatGPTAdapter(SiteAdapter):
                     results = await asyncio.wait_for(
                         asyncio.gather(
                             check_assistant_count(),
+                            check_assistant_selector(),
                             check_stop_button(),
                             check_textbox_cleared(),
                             check_text_change(),
@@ -1420,15 +1415,27 @@ class ChatGPTAdapter(SiteAdapter):
                             self._log(f"ask: assistant_count(after)={n_assist1} (new message, signal: assistant_count)")
                             send_confirmed = True
                             break
+
+                    # selector-based detection (fast path)
+                    if isinstance(results[1], str) and results[1] == "assistant_selector":
+                        try:
+                            n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.8)
+                            if n_assist1 <= n_assist0:
+                                n_assist1 = n_assist0 + 1
+                        except Exception:
+                            n_assist1 = n_assist0 + 1
+                        self._log("ask: assistant selector signaled new message")
+                        send_confirmed = True
+                        break
                     
                     # 检查其他信号（stop button、textbox cleared、text change）
-                    for i, result in enumerate(results[1:], 1):
+                    for i, result in enumerate(results[2:], 2):
                         if isinstance(result, str) and result:
                             signal_names = ["stop_button", "textbox_cleared", "text_change"]
-                            self._log(f"ask: send confirmed via {signal_names[i-1]} (signal: {result})")
+                            self._log(f"ask: send confirmed via {signal_names[i-2]} (signal: {result})")
                             send_confirmed = True
                             # 如果检测到 stop button 或 textbox cleared，也尝试获取 assistant_count
-                            if i <= 2:  # stop_button 或 textbox_cleared
+                            if i <= 3:  # stop_button 或 textbox_cleared
                                 try:
                                     n_assist1_check = await asyncio.wait_for(self._assistant_count(), timeout=0.8)
                                     if n_assist1_check > n_assist0:
