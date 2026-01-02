@@ -1595,15 +1595,18 @@ class ChatGPTAdapter(SiteAdapter):
                 self._log("ask: warning: new message content not confirmed, but continuing...")
             self._log(f"ask: content wait done ({time.time()-t2:.2f}s)")
 
-            # 等待输出稳定
+            # P1优化：等待输出稳定 - 只拉长度/哈希，最后一次拉全文
             self._log("ask: waiting output stabilize...")
-            # 优化：减少稳定时间，从2.0秒减少到1.5秒
             stable_seconds = 1.5
-            last_text = ""
+            last_text_len = 0
+            last_text_hash = ""
             last_change = time.time()
             hb = time.time()
-            # 优化：用于检测文本是否在增长（局部变量，避免实例属性污染）
+            # 用于检测文本是否在增长
             last_text_len_history = []
+            # 标记是否已经拉取过完整文本（用于最终返回）
+            final_text_fetched = False
+            final_text = ""
 
             while time.time() - ask_start_time < timeout_s:
                 elapsed = time.time() - ask_start_time
@@ -1613,66 +1616,109 @@ class ChatGPTAdapter(SiteAdapter):
                     break
                     
                 try:
-                    # 优化：使用索引定位，确保获取的是新消息（不是发送前的旧消息）
-                    # 当 assistant_count 增加时，读取最后一条消息（索引 = n_assist_current - 1）
+                    # P1优化：在浏览器侧只返回长度和哈希，不传输完整文本
+                    # 这样可以减少跨进程传输和 DOM layout 负担
                     n_assist_current = await self._assistant_count()
                     if n_assist_current > n_assist0:
-                        target_index = n_assist_current - 1  # 最后一条消息的索引（0-index）
-                        text = await asyncio.wait_for(
-                            self._get_assistant_text_by_index(target_index),
-                            timeout=2.0
-                        )
+                        target_index = n_assist_current - 1
                     else:
-                        # 如果 assistant_count 没有增加，fallback 到 _last_assistant_text
-                        text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
+                        target_index = max(0, n_assist_current - 1)
+                    
+                    # 使用 JS evaluate 获取长度和哈希（不传输完整文本）
+                    combined_sel = ", ".join(self.ASSISTANT_MSG)
+                    result = await self.page.evaluate(
+                        """(sel, idx) => {
+                            const els = document.querySelectorAll(sel);
+                            if (idx < 0 || idx >= els.length) return {len: 0, hash: ''};
+                            const el = els[idx];
+                            const text = (el.innerText || el.textContent || '').trim();
+                            const len = text.length;
+                            // 简单哈希：取前8个字符的字符码和（避免完整文本传输）
+                            let hash = 0;
+                            for (let i = 0; i < Math.min(8, text.length); i++) {
+                                hash = ((hash << 5) - hash) + text.charCodeAt(i);
+                                hash = hash & hash; // Convert to 32bit integer
+                            }
+                            return {len: len, hash: hash.toString(36)};
+                        }""",
+                        combined_sel,
+                        target_index
+                    )
+                    
+                    current_len = result.get("len", 0) if isinstance(result, dict) else 0
+                    current_hash = result.get("hash", "") if isinstance(result, dict) else ""
                     
                     # 确保获取的是新消息（不是发送前的旧消息）
-                    if text and text != last_assist_text_before:
-                        if text != last_text:
-                            last_text = text
+                    if current_len > 0 and current_hash != "":
+                        # 检查长度或哈希是否变化
+                        if current_len != last_text_len or current_hash != last_text_hash:
+                            last_text_len = current_len
+                            last_text_hash = current_hash
                             last_change = time.time()
-                            self._log(f"ask: text updated (len={len(last_text)}, remaining={remaining:.1f}s)")
+                            if current_len > 0:
+                                self._log(f"ask: text updated (len={current_len}, remaining={remaining:.1f}s)")
 
-                    # 优化（P1）：不要只依赖 Stop 按钮判断 generating
-                    # 如果文本长度在增加，或者 assistant_count 增加了，即使 Stop 按钮没抓到，也要认为 generating=True
-                    try:
-                        generating = await asyncio.wait_for(self._is_generating(), timeout=0.8)  # 减少超时
-                    except Exception:
-                        generating = False
-                    
-                    # 补充逻辑：如果最后一条消息不是空的，且正在变长，那也是在 generating
-                    if not generating and last_text:
-                        last_text_len = len(last_text)
-                        # 如果文本长度在增加，强制认为 generating=True
-                        if last_text_len > 0:
-                            # 检查文本是否在增长（通过比较当前长度和历史长度）
-                            last_text_len_history.append((time.time(), last_text_len))
-                            # 只保留最近 3 次记录
+                        # 检查是否正在生成
+                        try:
+                            generating = await asyncio.wait_for(self._is_generating(), timeout=0.5)
+                        except Exception:
+                            generating = False
+                        
+                        # 补充逻辑：如果文本长度在增加，强制认为 generating=True
+                        if not generating and current_len > 0:
+                            last_text_len_history.append((time.time(), current_len))
                             last_text_len_history[:] = last_text_len_history[-3:]
-                            # 如果最近 2 次记录显示长度在增加，认为正在生成
                             if len(last_text_len_history) >= 2:
                                 prev_len = last_text_len_history[-2][1]
-                                if last_text_len > prev_len:
+                                if current_len > prev_len:
                                     generating = True
-                                    self._log(f"ask: text growing ({prev_len}->{last_text_len}), forcing generating=True")
-                    
-                    # 优化：如果 last_len=0 且 generating=False，不要 sleep 太久，保持高频检查
-                    if not last_text and not generating:
-                        # 还在等待首字，保持高频检查（0.2秒）
-                        await asyncio.sleep(0.2)
-                        continue
-                    
-                    # 优化：添加快速路径 - 如果generating=False且文本长度在0.5秒内没有变化，直接认为稳定
-                    time_since_change = time.time() - last_change
-                    if last_text and (not generating) and time_since_change >= 0.5 and time_since_change >= stable_seconds:
-                        elapsed = time.time() - ask_start_time
-                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s, fast path: {time_since_change:.1f}s no change)")
-                        return last_text, self.page.url
-                    # 原有逻辑：稳定时间达到且不在生成
-                    if last_text and (time.time() - last_change) >= stable_seconds and (not generating):
-                        elapsed = time.time() - ask_start_time
-                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s)")
-                        return last_text, self.page.url
+                                    self._log(f"ask: text growing ({prev_len}->{current_len}), forcing generating=True")
+                        
+                        # 如果还在等待首字，保持高频检查
+                        if current_len == 0 and not generating:
+                            await asyncio.sleep(0.2)
+                            continue
+                        
+                        # 快速路径：如果 generating=False 且文本长度在 0.5 秒内没有变化，直接认为稳定
+                        time_since_change = time.time() - last_change
+                        if current_len > 0 and (not generating) and time_since_change >= 0.5 and time_since_change >= stable_seconds:
+                            # P1优化：稳定后，只拉取一次完整文本
+                            if not final_text_fetched:
+                                try:
+                                    if n_assist_current > n_assist0:
+                                        final_text = await asyncio.wait_for(
+                                            self._get_assistant_text_by_index(target_index),
+                                            timeout=2.0
+                                        )
+                                    else:
+                                        final_text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
+                                    final_text_fetched = True
+                                except Exception:
+                                    final_text = ""  # 如果拉取失败，返回空字符串
+                            
+                            elapsed = time.time() - ask_start_time
+                            self._log(f"ask: done (stabilized, total={elapsed:.1f}s, fast path: {time_since_change:.1f}s no change, len={current_len})")
+                            return final_text, self.page.url
+                        
+                        # 原有逻辑：稳定时间达到且不在生成
+                        if current_len > 0 and (time.time() - last_change) >= stable_seconds and (not generating):
+                            # P1优化：稳定后，只拉取一次完整文本
+                            if not final_text_fetched:
+                                try:
+                                    if n_assist_current > n_assist0:
+                                        final_text = await asyncio.wait_for(
+                                            self._get_assistant_text_by_index(target_index),
+                                            timeout=2.0
+                                        )
+                                    else:
+                                        final_text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
+                                    final_text_fetched = True
+                                except Exception:
+                                    final_text = ""  # 如果拉取失败，返回空字符串
+                            
+                            elapsed = time.time() - ask_start_time
+                            self._log(f"ask: done (stabilized, total={elapsed:.1f}s, len={current_len})")
+                            return final_text, self.page.url
                 except asyncio.TimeoutError:
                     # DOM 查询超时，继续等待
                     pass
@@ -1683,15 +1729,14 @@ class ChatGPTAdapter(SiteAdapter):
                     elapsed = time.time() - ask_start_time
                     remaining = timeout_s - elapsed
                     try:
-                        generating = await asyncio.wait_for(self._is_generating(), timeout=0.8)  # 减少超时
+                        generating = await asyncio.wait_for(self._is_generating(), timeout=0.5)
                     except (asyncio.TimeoutError, Exception):
-                        # 显式捕获 TimeoutError，避免 Future exception
                         generating = False
-                    self._log(f"ask: generating={generating}, last_len={len(last_text)}, remaining={remaining:.1f}s ...")
+                    self._log(f"ask: generating={generating}, last_len={last_text_len}, remaining={remaining:.1f}s ...")
                     hb = time.time()
 
-                # 优化：减少检查间隔，从0.6秒减少到0.4秒，加快检测速度
-                await asyncio.sleep(0.4)
+                # 优化：减少检查间隔，从0.4秒减少到0.3秒，加快检测速度
+                await asyncio.sleep(0.3)
 
             # 超时处理
             elapsed = time.time() - ask_start_time
@@ -1708,7 +1753,7 @@ class ChatGPTAdapter(SiteAdapter):
             else:
                 raise TimeoutError(
                     f"ask: timeout after {elapsed:.1f}s (limit={timeout_s}s). "
-                    f"No valid answer received. last_text_len={len(last_text)}"
+                    f"No valid answer received. last_text_len={last_text_len}"
                 )
 
         # 使用整体超时保护
