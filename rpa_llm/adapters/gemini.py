@@ -896,9 +896,19 @@ class GeminiAdapter(SiteAdapter):
             pass  # 检查失败不影响继续尝试点击
 
         # C) Click send (short, check disabled)
+        # 重要：在点击按钮之前，优先检查是否已经发送成功，避免误点击停止按钮
         for sel in self.SEND_BTN:
             if time.time() > deadline:
                 break
+
+            # 修复：在循环开始时，先检查是否已经发送成功（最优先检查）
+            # 如果已经发送成功，直接返回，不要继续尝试点击按钮
+            try:
+                if await self._is_generating():
+                    self._log("send: detected stop button at start of button loop, send already successful (skipping all button clicks to avoid stopping)")
+                    return "enter:detected_stop_at_button_loop_start"
+            except Exception:
+                pass
 
             btn = self.page.locator(sel).first
             try:
@@ -922,14 +932,15 @@ class GeminiAdapter(SiteAdapter):
 
                 # 修复：在点击之前，再次检查是否已经发送成功（防止在检查按钮状态期间已经发送）
                 try:
+                    # 优先检查 stop button（最可靠的信号）
+                    if await self._is_generating():
+                        self._log("send: detected stop button during button check, send already successful (skipping to avoid stopping)")
+                        return "enter:detected_stop_during_button_check"
+                    
                     current_text = (await self._tb_get_text(tb)).strip()
                     if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
                         self._log("send: detected textbox cleared during button check, send already successful")
                         return "enter:detected_during_button_check"
-                    
-                    if await self._is_generating():
-                        self._log("send: detected stop button during button check, send already successful")
-                        return "enter:detected_stop_during_button_check"
                 except Exception:
                     pass
 
@@ -937,22 +948,31 @@ class GeminiAdapter(SiteAdapter):
                 t0 = time.time()
                 max_wait = min(self.SEND_ENABLE_WAIT_S, 0.5)  # 最多等待 0.5 秒
                 while time.time() - t0 < max_wait:
+                    # 在等待期间，也检查是否已经发送成功
+                    try:
+                        if await self._is_generating():
+                            self._log("send: detected stop button during disabled check, send already successful (skipping to avoid stopping)")
+                            return "enter:detected_stop_during_disabled_check"
+                    except Exception:
+                        pass
+                    
                     aria_dis = await btn.get_attribute("aria-disabled")
                     dis_attr = await btn.get_attribute("disabled")
                     if aria_dis != "true" and dis_attr is None:
                         break
                     await asyncio.sleep(0.1)
 
-                # 修复：在点击之前，最后一次检查是否已经发送成功
+                # 修复：在点击之前，最后一次检查是否已经发送成功（最关键）
                 try:
+                    # 优先检查 stop button（最可靠的信号，避免误点击停止按钮）
+                    if await self._is_generating():
+                        self._log("send: detected stop button just before click, send already successful (skipping click to avoid stopping)")
+                        return "enter:detected_stop_just_before_click"
+                    
                     current_text = (await self._tb_get_text(tb)).strip()
                     if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
                         self._log("send: detected textbox cleared just before click, send already successful")
                         return "enter:detected_just_before_click"
-                    
-                    if await self._is_generating():
-                        self._log("send: detected stop button just before click, send already successful")
-                        return "enter:detected_stop_just_before_click"
                 except Exception:
                     pass
 
@@ -973,38 +993,49 @@ class GeminiAdapter(SiteAdapter):
 
         # D) JS click fallback (very limited)
         # 修复：在 JS click 之前，也要检查是否已经发送成功
+        # 重要：如果已经发送成功（stop button 出现），绝对不要尝试点击任何按钮，避免误点击停止按钮
         try:
-            # 先检查是否已经发送成功
+            # 先检查是否已经发送成功（最优先检查，避免误点击停止按钮）
+            if await self._is_generating():
+                self._log("send: detected stop button before JS click, send already successful (skipping JS click to avoid stopping)")
+                return "enter:detected_stop_before_js_click"
+            
             current_text = (await self._tb_get_text(tb)).strip()
             if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
                 self._log("send: detected textbox cleared before JS click, send already successful")
                 return "enter:detected_before_js_click"
             
-            if await self._is_generating():
-                self._log("send: detected stop button before JS click, send already successful")
-                return "enter:detected_stop_before_js_click"
-            
-            btn = self.page.locator("button.send-button").first
-            if await btn.count() > 0:
-                # 检查按钮是否是停止按钮
-                try:
-                    aria_label = await btn.get_attribute("aria-label") or ""
-                    if "停止" in aria_label or "Stop" in aria_label or "stop" in aria_label.lower():
-                        self._log(f"send: JS click target is a stop button (aria-label={aria_label}), skipping")
-                        raise RuntimeError("send not accepted (JS click target is stop button)")
-                except RuntimeError:
-                    raise
-                except Exception:
-                    pass
-                
-                h = await btn.element_handle()
-                if h:
-                    await h.evaluate("(el)=>el.click()")
-                    reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=1.2)
-                    if reason:
-                        return f"js_click:{reason}"
-        except RuntimeError:
-            raise
+            # 使用更精确的选择器，排除停止按钮
+            # 不要使用 "button.send-button"，因为它可能匹配到停止按钮
+            # 使用 SEND_BTN 中的第一个选择器（已经排除了停止按钮）
+            for sel in self.SEND_BTN[:1]:  # 只使用第一个选择器（最精确的）
+                btn = self.page.locator(sel).first
+                if await btn.count() > 0:
+                    # 再次检查按钮是否是停止按钮（双重保险）
+                    try:
+                        aria_label = await btn.get_attribute("aria-label") or ""
+                        btn_class = await btn.get_attribute("class") or ""
+                        if "停止" in aria_label or "Stop" in aria_label or "stop" in aria_label.lower():
+                            self._log(f"send: JS click target is a stop button (aria-label={aria_label}), skipping")
+                            continue  # 跳过这个按钮，尝试下一个
+                        if "stop" in btn_class.lower():
+                            self._log(f"send: JS click target has stop class ({btn_class}), skipping")
+                            continue
+                    except Exception:
+                        pass
+                    
+                    # 在点击之前，最后一次检查是否已经发送成功
+                    if await self._is_generating():
+                        self._log("send: detected stop button just before JS click, send already successful (skipping to avoid stopping)")
+                        return "enter:detected_stop_just_before_js_click"
+                    
+                    h = await btn.element_handle()
+                    if h:
+                        await h.evaluate("(el)=>el.click()")
+                        reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=1.2)
+                        if reason:
+                            return f"js_click:{reason}"
+                    break  # 如果点击成功，退出循环
         except Exception:
             pass
 
