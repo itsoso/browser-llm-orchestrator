@@ -606,7 +606,10 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                     timeout=0.8  # 从 1.0 秒减少到 0.8 秒，加快 fallback
                 )
                 return
-            except (asyncio.TimeoutError, Exception):
+            except (asyncio.TimeoutError, Exception) as e:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during _tb_set_text: {e}") from e
                 pass  # 失败后 fallback 到原有逻辑
         
         # 原有逻辑（用于长文本或快速路径失败）
@@ -619,7 +622,10 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         # 优化：减少 focus 超时时间
         try:
             await asyncio.wait_for(tb.focus(), timeout=0.3)  # 从 0.5 秒减少到 0.3 秒
-        except (asyncio.TimeoutError, Exception):
+        except (asyncio.TimeoutError, Exception) as e:
+            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+            if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                raise RuntimeError(f"Browser/page closed during focus: {e}") from e
             pass  # focus 失败不影响继续
         
         if kind == "textarea":
@@ -627,6 +633,9 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             try:
                 await asyncio.wait_for(tb.fill(text), timeout=3.0)  # 从 5 秒减少到 3 秒
             except (asyncio.TimeoutError, Exception) as e:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during fill: {e}") from e
                 raise RuntimeError(f"_tb_set_text: fill() timeout or failed: {e}")
             return
 
@@ -657,12 +666,18 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 }""", text),
                 timeout=2.5  # 从 3.0 秒减少到 2.5 秒
             )
-        except (asyncio.TimeoutError, Exception):
+        except (asyncio.TimeoutError, Exception) as e:
+            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+            if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                raise RuntimeError(f"Browser/page closed during evaluate: {e}") from e
             # 最后 fallback 到 type()，但也要添加超时
             try:
                 await asyncio.wait_for(tb.type(text, delay=0), timeout=6.0)  # 从 8.0 秒减少到 6.0 秒
-            except (asyncio.TimeoutError, Exception) as e:
-                raise RuntimeError(f"_tb_set_text: all methods failed: {e}")
+            except (asyncio.TimeoutError, Exception) as type_err:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(type_err) or "Target page" in str(type_err) or "Target context" in str(type_err):
+                    raise RuntimeError(f"Browser/page closed during type: {type_err}") from type_err
+                raise RuntimeError(f"_tb_set_text: all methods failed: {type_err}")
 
     async def try_click(self, selectors: List[str], timeout_ms: int = 1500) -> bool:
         for sel in selectors:

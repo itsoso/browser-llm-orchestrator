@@ -1077,6 +1077,11 @@ class ChatGPTAdapter(SiteAdapter):
                             self._log(f"send: set text via _tb_set_text (len={prompt_len})")
                             type_success = True
                         except (asyncio.TimeoutError, Exception) as set_text_err:
+                            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                            if "TargetClosed" in str(set_text_err) or "Target page" in str(set_text_err) or "Target context" in str(set_text_err):
+                                self._log(f"send: browser/page closed during _tb_set_text, raising error")
+                                raise RuntimeError(f"Browser/page closed during _tb_set_text: {set_text_err}") from set_text_err
+                            
                             # 如果 _tb_set_text 失败，fallback 到 type()
                             err_msg = str(set_text_err) if set_text_err else "timeout or unknown error"
                             self._log(f"send: _tb_set_text failed ({err_msg}), trying type()...")
@@ -1084,7 +1089,10 @@ class ChatGPTAdapter(SiteAdapter):
                             # 确保元素有焦点
                             try:
                                 await asyncio.wait_for(tb.focus(), timeout=2.0)  # 从 3 秒减少到 2 秒
-                            except (asyncio.TimeoutError, Exception):
+                            except (asyncio.TimeoutError, Exception) as focus_err:
+                                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                                if "TargetClosed" in str(focus_err) or "Target page" in str(focus_err) or "Target context" in str(focus_err):
+                                    raise RuntimeError(f"Browser/page closed during focus: {focus_err}") from focus_err
                                 pass  # focus 失败不致命
                             
                             # 设置超时（毫秒），根据长度动态调整
