@@ -1125,34 +1125,57 @@ class ChatGPTAdapter(SiteAdapter):
         send_phase_max_s = float(os.environ.get("CHATGPT_SEND_PHASE_MAX_S", "8.0"))
 
         # 优化：提取辅助方法，减少重复代码
+        # 优化：使用并行检查，加快检测速度
         async def check_if_sent(method_name: str) -> bool:
-            """检查是否已经发送成功（多重检查：user_count、textbox cleared、stop button）"""
+            """检查是否已经发送成功（多重检查：user_count、textbox cleared、stop button，并行执行）"""
             try:
-                # 检查 1: user_count 增加（最可靠）
-                user_count_now = await self._user_count()
-                if user_count_now > user_count_before_send:
-                    self._log(f"send: confirmed sent via {method_name} (user_count={user_count_now})")
-                    return True
+                # 优化：并行检查多个信号，谁先成功就返回
+                async def check_user_count():
+                    try:
+                        user_count_now = await asyncio.wait_for(self._user_count(), timeout=0.8)
+                        if user_count_now > user_count_before_send:
+                            return f"user_count={user_count_now}"
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    return None
                 
-                # 检查 2: textbox 已清空
-                try:
-                    tb_loc = self.page.locator('div[id="prompt-textarea"]').first
-                    if await tb_loc.count() > 0:
-                        text_now = await asyncio.wait_for(self._tb_get_text(tb_loc), timeout=0.3)
-                        if text_now is not None and text_now.strip() == "":
-                            self._log(f"send: confirmed sent via {method_name} (textbox cleared)")
-                            return True
-                except Exception:
-                    pass
+                async def check_textbox_cleared():
+                    try:
+                        tb_loc = self.page.locator('div[id="prompt-textarea"]').first
+                        if await tb_loc.count() > 0:
+                            text_now = await asyncio.wait_for(self._tb_get_text(tb_loc), timeout=0.3)
+                            if text_now is not None and text_now.strip() == "":
+                                return "textbox_cleared"
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    return None
                 
-                # 检查 3: stop button 出现（表示正在生成）
-                try:
-                    if await self._is_generating():
-                        self._log(f"send: confirmed sent via {method_name} (stop button visible)")
+                async def check_stop_button():
+                    try:
+                        if await asyncio.wait_for(self._is_generating(), timeout=0.5):
+                            return "stop_button_visible"
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    return None
+                
+                # 并行执行所有检查，总超时 1.0 秒
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        check_user_count(),
+                        check_textbox_cleared(),
+                        check_stop_button(),
+                        return_exceptions=True
+                    ),
+                    timeout=1.0
+                )
+                
+                # 检查结果，优先返回 user_count（最可靠）
+                for i, result in enumerate(results):
+                    if isinstance(result, str) and result:
+                        signal_names = ["user_count", "textbox_cleared", "stop_button"]
+                        self._log(f"send: confirmed sent via {method_name} ({signal_names[i]}: {result})")
                         return True
-                except Exception:
-                    pass
-            except Exception:
+            except (asyncio.TimeoutError, Exception):
                 pass
             return False
 
@@ -1162,7 +1185,7 @@ class ChatGPTAdapter(SiteAdapter):
         try:
             self._log("send: trying Control+Enter first (most reliable)...")
             await tb.press("Control+Enter", timeout=3000)
-            await asyncio.sleep(0.2)  # 减少等待时间，加快检测
+            await asyncio.sleep(0.15)  # 减少等待时间，从 0.2s 减少到 0.15s
             self._log("send: Control+Enter pressed")
             if await check_if_sent("Control+Enter"):
                 return
@@ -1170,7 +1193,7 @@ class ChatGPTAdapter(SiteAdapter):
             pass
 
         # 快速检查 Control+Enter 是否生效（减少等待时间）
-        await asyncio.sleep(0.3)  # 从 0.5s 减少到 0.3s
+        await asyncio.sleep(0.2)  # 从 0.3s 减少到 0.2s
         if await check_if_sent("Control+Enter (after wait)"):
             return
 
@@ -1179,14 +1202,14 @@ class ChatGPTAdapter(SiteAdapter):
             self._log("send: trying Enter as fallback...")
             await tb.press("Enter", timeout=3000)
             self._log("send: Enter pressed")
-            await asyncio.sleep(0.2)  # 减少等待时间
+            await asyncio.sleep(0.15)  # 减少等待时间，从 0.2s 减少到 0.15s
             if await check_if_sent("Enter"):
                 return
         except Exception:
             pass
 
         # 快速检查 Enter 是否生效
-        await asyncio.sleep(0.3)  # 从 0.5s 减少到 0.3s
+        await asyncio.sleep(0.2)  # 从 0.3s 减少到 0.2s
         if await check_if_sent("Enter (after wait)"):
             return
 

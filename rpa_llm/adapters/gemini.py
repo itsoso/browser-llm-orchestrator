@@ -760,7 +760,7 @@ class GeminiAdapter(SiteAdapter):
                         check_assistant_count(),
                         return_exceptions=True
                     ),
-                    timeout=min(0.8, timeout_s - (time.time() - t0))  # 每次检查最多 0.8 秒
+                    timeout=min(0.6, timeout_s - (time.time() - t0))  # 每次检查最多 0.6 秒（从 0.8s 减少）
                 )
                 
                 # 检查结果，优先返回 textbox_clear（最可靠）
@@ -797,7 +797,7 @@ class GeminiAdapter(SiteAdapter):
         except Exception as e:
             self._log(f"send: Enter(keyboard) error: {type(e).__name__}: {str(e)[:120]}")
 
-        # 优化：激进检查 - 如果输入框在 1.5 秒内变空，直接认为发送成功，跳过后续所有按钮点击
+        # 优化：激进检查 - 如果输入框在 1.0 秒内变空，直接认为发送成功，跳过后续所有按钮点击
         # 优化：强制使用 textbox_clear 判定法（最可靠，比按钮点击可靠 100 倍）
         try:
             # 使用 wait_for_function 快速检测输入框是否变空（最可靠的信号）
@@ -808,19 +808,32 @@ class GeminiAdapter(SiteAdapter):
                             || document.querySelector('div[contenteditable="true"]');
                         return el && (el.innerText || el.textContent || '').trim() === '';
                     }""",
-                    timeout=1500  # 减少到 1.5 秒，加快响应
+                    timeout=1000  # 减少到 1.0 秒，加快响应
                 ),
-                timeout=1.7  # 总超时 1.7 秒
+                timeout=1.2  # 总超时 1.2 秒
             )
-            self._log("send: fast confirm - Enter key worked (input cleared in 1.5s)!")
+            self._log("send: fast confirm - Enter key worked (input cleared in 1.0s)!")
             return "enter:fast_confirm_textbox_cleared"
-        except (asyncio.TimeoutError, Exception):
-            # Enter 没生效或超时，继续走后面的检查逻辑
+        except (asyncio.TimeoutError, Exception) as e:
+            # Enter 没生效或超时，立即检查是否已经发送成功（可能发送成功但检测延迟）
             # 显式捕获 TimeoutError，避免 Future exception
-            pass
+            try:
+                # 立即检查：textbox 是否已清空（即使 wait_for_function 超时，可能已经清空了）
+                current_text = (await self._tb_get_text(tb)).strip()
+                if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
+                    self._log("send: fast confirm - Enter key worked (detected after wait_for_function timeout)!")
+                    return "enter:fast_confirm_after_timeout"
+                
+                # 立即检查：stop button 是否出现
+                if await self._is_generating():
+                    self._log("send: fast confirm - Enter key worked (stop button detected after timeout)!")
+                    return "enter:fast_confirm_stop_after_timeout"
+            except Exception:
+                pass  # 检查失败不影响继续
 
         # 优化：使用并行"信号竞争"机制，减少等待时间
-        reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=0.8)  # 减少到 0.8 秒
+        # 优化：减少超时时间，从 0.8 秒减少到 0.5 秒，加快检测
+        reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=0.5)  # 减少到 0.5 秒
         if reason:
             return f"enter:{reason}"
 
