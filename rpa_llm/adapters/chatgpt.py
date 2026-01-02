@@ -2169,23 +2169,23 @@ class ChatGPTAdapter(SiteAdapter):
         # 如果 20 秒内没有检测到，会立即检查文本变化，而不是继续等待
         assistant_wait_timeout = min(remaining * 0.2, 20)  # 最多20秒（从 15 秒增加到 20 秒，给 ChatGPT Pro 更多时间）
         n_assist1 = n_assist0
-            
-            # 关键修复：在开始等待之前，先检查一次 thinking 状态
-            # 如果已经在思考，可以提前知道，避免不必要的等待
-            try:
-                thinking_precheck = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
-                if thinking_precheck:
-                    self._log("ask: detected thinking mode before assistant wait, will prioritize thinking detection")
-            except Exception:
-                pass  # 检测失败不影响主流程
-            
-            # P1优化：使用高频轮询 + wait_for_function 混合策略
-            # 先尝试高频轮询（更快），如果失败再使用 wait_for_function（更可靠）
-            combined_sel = ", ".join(self.ASSISTANT_MSG)
-            
-            # 优化：先尝试高频轮询（最多 2.0 秒），这样可以更快检测到新消息
-            # 关键修复：在轮询过程中，定期检测 thinking 状态
-            n_assist1 = n_assist0
+        
+        # 关键修复：在开始等待之前，先检查一次 thinking 状态
+        # 如果已经在思考，可以提前知道，避免不必要的等待
+        try:
+            thinking_precheck = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
+            if thinking_precheck:
+                self._log("ask: detected thinking mode before assistant wait, will prioritize thinking detection")
+        except Exception:
+            pass  # 检测失败不影响主流程
+        
+        # P1优化：使用高频轮询 + wait_for_function 混合策略
+        # 先尝试高频轮询（更快），如果失败再使用 wait_for_function（更可靠）
+        combined_sel = ", ".join(self.ASSISTANT_MSG)
+        
+        # 优化：先尝试高频轮询（最多 2.0 秒），这样可以更快检测到新消息
+        # 关键修复：在轮询过程中，定期检测 thinking 状态
+        n_assist1 = n_assist0
             polling_success = False
             thinking_detected_during_polling = False
             for attempt in range(200):  # 2.0 秒 / 0.01 秒 = 200 次（增加轮询次数）
