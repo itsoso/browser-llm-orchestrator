@@ -672,79 +672,119 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("send: pressing Control+Enter (fast path)...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 优化：使用高频轮询，而不是等待超时
+        # 优化：使用高频轮询，同时检查多个信号（user_count, textbox cleared, stop button）
         # 这样可以更快地检测到发送成功，避免长时间等待
         combined_user_sel = ", ".join(self.USER_MSG)
         
-        # 高频轮询检查（每 0.05 秒检查一次，最多 2 秒）
-        max_attempts = 40  # 2 秒 / 0.05 秒 = 40 次
+        # 高频轮询检查（每 0.03 秒检查一次，最多 1.5 秒）
+        max_attempts = 50  # 1.5 秒 / 0.03 秒 = 50 次
         for attempt in range(max_attempts):
             try:
-                # 直接使用 page.evaluate，避免 Playwright 的额外开销
-                current_user_count = await asyncio.wait_for(
+                # 并行检查多个信号：user_count, textbox cleared, stop button
+                # 使用 page.evaluate 一次性检查所有信号，避免多次调用
+                result = await asyncio.wait_for(
                     self.page.evaluate(
-                        """(sel) => {
-                            return document.querySelectorAll(sel).length;
+                        """(args) => {
+                            const userSel = args.userSel;
+                            const user0 = args.user0;
+                            
+                            // 检查 1: user_count 增加
+                            const userCount = document.querySelectorAll(userSel).length;
+                            if (userCount > user0) return {signal: 'user_count', value: userCount};
+                            
+                            // 检查 2: textbox 清空
+                            const textbox = document.querySelector('#prompt-textarea');
+                            if (textbox) {
+                                const text = (textbox.innerText || textbox.textContent || '').trim();
+                                if (text.length === 0) return {signal: 'textbox_cleared', value: true};
+                            }
+                            
+                            // 检查 3: stop button 出现
+                            const stopBtns = document.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="停止"]');
+                            for (let btn of stopBtns) {
+                                if (btn.offsetParent !== null) return {signal: 'stop_button', value: true};
+                            }
+                            
+                            return {signal: 'none', value: false};
                         }""",
-                        combined_user_sel
+                        {"userSel": combined_user_sel, "user0": user0}
                     ),
-                    timeout=0.1  # 每次检查最多 0.1 秒
+                    timeout=0.08  # 每次检查最多 0.08 秒
                 )
-                if isinstance(current_user_count, int) and current_user_count > user0:
-                    self._log(f"send: user_count increased ({user0} -> {current_user_count}), send confirmed (attempt {attempt+1})")
+                
+                if isinstance(result, dict) and result.get("signal") != "none":
+                    signal = result.get("signal")
+                    value = result.get("value")
+                    if signal == "user_count":
+                        self._log(f"send: user_count increased ({user0} -> {value}), send confirmed (attempt {attempt+1})")
+                    elif signal == "textbox_cleared":
+                        self._log(f"send: textbox cleared, send confirmed (attempt {attempt+1})")
+                    elif signal == "stop_button":
+                        self._log(f"send: stop button appeared, send confirmed (attempt {attempt+1})")
                     return
             except (asyncio.TimeoutError, Exception):
                 pass
             
-            # 每 0.05 秒检查一次
-            await asyncio.sleep(0.05)
+            # 每 0.03 秒检查一次（从 0.05 秒减少到 0.03 秒）
+            await asyncio.sleep(0.03)
         
-        # 如果高频轮询失败，尝试并行确认（作为兜底）
+        # 如果高频轮询失败，尝试并行确认（作为兜底，但减少超时时间）
         self._log("send: high-frequency polling failed, trying parallel confirmation...")
-        if await self._fast_send_confirm(user0, timeout_ms=500):
+        if await self._fast_send_confirm(user0, timeout_ms=400):  # 从 500ms 减少到 400ms
             self._log("send: fast path confirmed (parallel confirmation)")
             return
-        
-        # 最后再检查一次 user_count（可能刚刚更新）
-        try:
-            current_user_count = await asyncio.wait_for(
-                self.page.evaluate(
-                    """(sel) => {
-                        return document.querySelectorAll(sel).length;
-                    }""",
-                    combined_user_sel
-                ),
-                timeout=0.2
-            )
-            if isinstance(current_user_count, int) and current_user_count > user0:
-                self._log(f"send: user_count increased ({user0} -> {current_user_count}), send confirmed (final check)")
-                return
-        except (asyncio.TimeoutError, Exception):
-            pass
         
         # 如果还是失败，再按一次 Control+Enter
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 再次高频轮询（最多 1 秒）
-        for attempt in range(20):  # 1 秒 / 0.05 秒 = 20 次
+        # 再次高频轮询（最多 1 秒，使用相同的多信号检查）
+        for attempt in range(33):  # 1 秒 / 0.03 秒 = 33 次
             try:
-                current_user_count = await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     self.page.evaluate(
-                        """(sel) => {
-                            return document.querySelectorAll(sel).length;
+                        """(args) => {
+                            const userSel = args.userSel;
+                            const user0 = args.user0;
+                            
+                            // 检查 1: user_count 增加
+                            const userCount = document.querySelectorAll(userSel).length;
+                            if (userCount > user0) return {signal: 'user_count', value: userCount};
+                            
+                            // 检查 2: textbox 清空
+                            const textbox = document.querySelector('#prompt-textarea');
+                            if (textbox) {
+                                const text = (textbox.innerText || textbox.textContent || '').trim();
+                                if (text.length === 0) return {signal: 'textbox_cleared', value: true};
+                            }
+                            
+                            // 检查 3: stop button 出现
+                            const stopBtns = document.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="停止"]');
+                            for (let btn of stopBtns) {
+                                if (btn.offsetParent !== null) return {signal: 'stop_button', value: true};
+                            }
+                            
+                            return {signal: 'none', value: false};
                         }""",
-                        combined_user_sel
+                        {"userSel": combined_user_sel, "user0": user0}
                     ),
-                    timeout=0.1
+                    timeout=0.08
                 )
-                if isinstance(current_user_count, int) and current_user_count > user0:
-                    self._log(f"send: user_count increased ({user0} -> {current_user_count}), send confirmed (second attempt, attempt {attempt+1})")
+                
+                if isinstance(result, dict) and result.get("signal") != "none":
+                    signal = result.get("signal")
+                    value = result.get("value")
+                    if signal == "user_count":
+                        self._log(f"send: user_count increased ({user0} -> {value}), send confirmed (second attempt, attempt {attempt+1})")
+                    elif signal == "textbox_cleared":
+                        self._log(f"send: textbox cleared, send confirmed (second attempt, attempt {attempt+1})")
+                    elif signal == "stop_button":
+                        self._log(f"send: stop button appeared, send confirmed (second attempt, attempt {attempt+1})")
                     return
             except (asyncio.TimeoutError, Exception):
                 pass
             
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.03)
         
         # 如果还是失败，抛出异常（让上层处理）
         raise RuntimeError("send not accepted after 2 Control+Enter attempts")
@@ -1500,44 +1540,71 @@ class ChatGPTAdapter(SiteAdapter):
             assistant_wait_timeout = min(remaining * 0.4, 90)  # 最多90秒
             n_assist1 = n_assist0
             
-            # P1优化：使用 wait_for_function 直接等待 assistant_count 增加（事件驱动）
-            # 这比轮询快得多，且避免 Future exception 和轮询开销
-            try:
-                combined_sel = ", ".join(self.ASSISTANT_MSG)
-                # 修复：wait_for_function 的正确调用方式
-                # Playwright 的 wait_for_function 签名：wait_for_function(expression, arg=None, timeout=None)
-                # 注意：arg 和 timeout 都必须作为关键字参数传递
-                await self.page.wait_for_function(
-                    """(args) => {
-                        const n0 = args.n0;
-                        const sel = args.sel;
-                        const n = document.querySelectorAll(sel).length;
-                        return n > n0;
-                    }""",
-                    arg={"n0": n_assist0, "sel": combined_sel},
-                    timeout=int(assistant_wait_timeout * 1000)  # wait_for_function 使用毫秒，确保是整数
-                )
-                # 等待成功后，获取实际的 assistant_count
-                n_assist1 = await self._assistant_count()
-                self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via wait_for_function)")
-            except Exception as e:
-                # wait_for_function 超时或失败，fallback 到快速检查
-                self._log(f"ask: wait_for_function timeout/error ({e}), falling back to quick check...")
+            # P1优化：使用高频轮询 + wait_for_function 混合策略
+            # 先尝试高频轮询（更快），如果失败再使用 wait_for_function（更可靠）
+            combined_sel = ", ".join(self.ASSISTANT_MSG)
+            
+            # 优化：先尝试高频轮询（最多 3 秒），这样可以更快检测到新消息
+            n_assist1 = n_assist0
+            polling_success = False
+            for attempt in range(60):  # 3 秒 / 0.05 秒 = 60 次
                 try:
-                    n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
-                    if n_assist1 > n_assist0:
-                        self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
-                    else:
-                        # 如果计数没有增加，尝试检查文本变化
-                        try:
-                            text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.8)
-                            if text_quick and text_quick != last_assist_text_before:
-                                self._log("ask: text changed, assuming new message")
-                                n_assist1 = n_assist0 + 1  # 合成值
-                        except Exception:
-                            pass
-                except Exception:
-                    n_assist1 = n_assist0  # 保持原值
+                    current_count = await asyncio.wait_for(
+                        self.page.evaluate(
+                            """(sel) => {
+                                return document.querySelectorAll(sel).length;
+                            }""",
+                            combined_sel
+                        ),
+                        timeout=0.05  # 每次检查最多 0.05 秒
+                    )
+                    if isinstance(current_count, int) and current_count > n_assist0:
+                        n_assist1 = current_count
+                        self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via high-frequency polling, attempt {attempt+1})")
+                        polling_success = True
+                        break
+                except (asyncio.TimeoutError, Exception):
+                    pass
+                
+                await asyncio.sleep(0.05)
+            
+            # 如果高频轮询失败，使用 wait_for_function（事件驱动，更可靠）
+            if not polling_success:
+                try:
+                    # 修复：wait_for_function 的正确调用方式
+                    # Playwright 的 wait_for_function 签名：wait_for_function(expression, arg=None, timeout=None)
+                    # 注意：arg 和 timeout 都必须作为关键字参数传递
+                    await self.page.wait_for_function(
+                        """(args) => {
+                            const n0 = args.n0;
+                            const sel = args.sel;
+                            const n = document.querySelectorAll(sel).length;
+                            return n > n0;
+                        }""",
+                        arg={"n0": n_assist0, "sel": combined_sel},
+                        timeout=int(assistant_wait_timeout * 1000)  # wait_for_function 使用毫秒，确保是整数
+                    )
+                    # 等待成功后，获取实际的 assistant_count
+                    n_assist1 = await self._assistant_count()
+                    self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via wait_for_function)")
+                except Exception as e:
+                    # wait_for_function 超时或失败，fallback 到快速检查
+                    self._log(f"ask: wait_for_function timeout/error ({e}), falling back to quick check...")
+                    try:
+                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
+                        if n_assist1 > n_assist0:
+                            self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
+                        else:
+                            # 如果计数没有增加，尝试检查文本变化
+                            try:
+                                text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.8)
+                                if text_quick and text_quick != last_assist_text_before:
+                                    self._log("ask: text changed, assuming new message")
+                                    n_assist1 = n_assist0 + 1  # 合成值
+                            except Exception:
+                                pass
+                    except Exception:
+                        n_assist1 = n_assist0  # 保持原值
                 
                 # 如果仍然没有检测到新消息，触发 manual checkpoint
                 if n_assist1 <= n_assist0:
