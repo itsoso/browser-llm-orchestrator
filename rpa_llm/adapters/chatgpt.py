@@ -108,26 +108,68 @@ class ChatGPTAdapter(SiteAdapter):
         print(f"[{beijing_now_iso()}] [{self.site_id}] {msg}", flush=True)
 
     def _desired_variant(self) -> str:
+        """
+        确定所需的 ChatGPT 变体类型
+        
+        返回:
+            "pro": 需要打开模型选择器选择 Pro 相关模型
+            "thinking": 只需要设置 thinking toggle
+            "instant": 需要打开模型选择器选择 Instant 相关模型，或只设置 thinking toggle
+            "custom": 需要打开模型选择器选择自定义模型（如 5.2instant, 5.2pro）
+        """
         # 优先使用实例变量（从 ask 方法传入），其次使用环境变量
         if self._model_version:
             v = self._model_version.strip().lower()
-            # 支持多种格式：5.2pro, 5.2-pro, gpt-5.2-pro, pro, thinking, instant
-            if "5.2" in v or "pro" in v:
-                return "pro"
+            # 关键修复：先检查完整的组合匹配，再检查部分匹配
+            # 这样可以确保 "5.2instant" 不会被误判为 "pro"
+            
+            # 1. 检查完整的组合（优先级最高）
+            if "5.2instant" in v or "5-2-instant" in v or "5.2-instant" in v:
+                return "custom"  # 需要打开模型选择器选择 5.2 Instant
+            if "5.2pro" in v or "5-2-pro" in v or "5.2-pro" in v or "gpt-5.2-pro" in v:
+                return "pro"  # 需要打开模型选择器选择 5.2 Pro
+            
+            # 2. 检查部分匹配（通用匹配）
             if "thinking" in v:
                 return "thinking"
             if "instant" in v:
+                # 如果是单独的 "instant"，只需要设置 thinking toggle
+                # 如果是 "5.2instant" 已经在上面处理了
                 return "instant"
-            # 如果无法识别，返回原值（可能需要在 ensure_variant 中特殊处理）
-            return v
+            if "gpt-5" in v or "gpt5" in v:
+                return "pro"  # GPT-5 相关默认是 pro
+            if "pro" in v:
+                return "pro"
+            
+            # 如果无法识别，返回 "custom" 让 ensure_variant 处理
+            return "custom"
         
-        # CHATGPT_VARIANT=instant|thinking|pro|5.2pro|gpt-5.2-pro
+        # CHATGPT_VARIANT=instant|thinking|pro|5.2pro|5.2instant|gpt-5.2-pro
         v = (os.environ.get("CHATGPT_VARIANT") or "thinking").strip().lower()
+        
+        # 先检查精确匹配
         if v in ("instant", "thinking", "pro"):
             return v
-        # 支持 5.2pro, 5.2-pro, gpt-5.2-pro 等格式
-        if "5.2" in v or ("pro" in v and "thinking" not in v and "instant" not in v):
+        
+        # 检查完整的组合
+        if "5.2instant" in v or "5-2-instant" in v or "5.2-instant" in v:
+            return "custom"
+        if "5.2pro" in v or "5-2-pro" in v or "5.2-pro" in v or "gpt-5.2-pro" in v:
             return "pro"
+        
+        # 检查部分匹配（需要排除已处理的组合）
+        if "5.2" in v:
+            # 如果包含 5.2 但不包含 instant，默认是 pro
+            if "instant" not in v:
+                return "pro"
+            # 如果包含 5.2 和 instant，已经在上面处理了
+            return "custom"
+        
+        if "gpt-5" in v or "gpt5" in v:
+            return "pro"  # GPT-5 相关默认是 pro
+        if "pro" in v and "thinking" not in v and "instant" not in v:
+            return "pro"
+        
         return "thinking"
 
     def _new_chat_enabled(self) -> bool:
@@ -337,22 +379,35 @@ class ChatGPTAdapter(SiteAdapter):
         # 如果提供了 model_version，构建更精确的匹配模式
         if model_version:
             model_version_lower = model_version.lower()
-            # 提取关键数字和关键词（如 "5.2", "pro", "gpt-4o"）
-            version_parts = []
-            if "5.2" in model_version_lower or "5-2" in model_version_lower:
-                version_parts.append(r"5[.\-]?2")
-            if "4o" in model_version_lower or "4-o" in model_version_lower:
-                version_parts.append(r"4[.\-]?o")
-            if "pro" in model_version_lower:
-                version_parts.append(r"\bpro\b|专业|Professional")
-            if "gpt" in model_version_lower:
-                version_parts.append(r"gpt")
+            # 关键修复：优先处理完整的组合匹配，再处理部分匹配
+            # 这样可以确保 "5.2instant" 优先匹配 Instant，而不是 Pro
             
-            # 如果有关键部分，使用更精确的模式
-            if version_parts:
-                enhanced_pattern = re.compile("|".join(version_parts), re.I)
+            # 1. 优先检查完整的组合（优先级最高）
+            if "5.2instant" in model_version_lower or "5-2-instant" in model_version_lower or "5.2-instant" in model_version_lower:
+                # 5.2 Instant 的精确匹配
+                enhanced_pattern = re.compile(r"5[.\-]?2.*instant|instant.*5[.\-]?2|5[.\-]?2.*即时|即时.*5[.\-]?2", re.I)
+            elif "5.2pro" in model_version_lower or "5-2-pro" in model_version_lower or "5.2-pro" in model_version_lower:
+                # 5.2 Pro 的精确匹配
+                enhanced_pattern = re.compile(r"5[.\-]?2.*pro|pro.*5[.\-]?2|5[.\-]?2.*专业|专业.*5[.\-]?2", re.I)
             else:
-                enhanced_pattern = pattern
+                # 2. 部分匹配（通用匹配）
+                version_parts = []
+                if "5.2" in model_version_lower or "5-2" in model_version_lower:
+                    version_parts.append(r"5[.\-]?2")
+                if "4o" in model_version_lower or "4-o" in model_version_lower:
+                    version_parts.append(r"4[.\-]?o")
+                if "instant" in model_version_lower:
+                    version_parts.append(r"\binstant\b|即时|Instant")
+                if "pro" in model_version_lower:
+                    version_parts.append(r"\bpro\b|专业|Professional")
+                if "gpt" in model_version_lower:
+                    version_parts.append(r"gpt")
+                
+                # 如果有关键部分，使用更精确的模式
+                if version_parts:
+                    enhanced_pattern = re.compile("|".join(version_parts), re.I)
+                else:
+                    enhanced_pattern = pattern
         else:
             enhanced_pattern = pattern
         
@@ -405,15 +460,25 @@ class ChatGPTAdapter(SiteAdapter):
         v = self._desired_variant()
         self._log(f"mode: desired={v}, model_version={model_version or self._model_version or 'env'}")
 
-        if v in ("thinking", "instant"):
-            await self._set_thinking_toggle(want_thinking=(v == "thinking"))
+        # 处理 thinking 模式（只需要设置 toggle，不需要打开模型选择器）
+        if v == "thinking":
+            await self._set_thinking_toggle(want_thinking=True)
             self._variant_set = True
             if model_version:
-                self._model_version = model_version  # 保存到实例变量
+                self._model_version = model_version
             return
 
-        # 处理 pro 模式或自定义模型版本
-        if v == "pro" or (model_version and model_version.lower() not in ("thinking", "instant")):
+        # 处理 instant 模式（单独的 "instant"，只需要设置 toggle）
+        if v == "instant":
+            await self._set_thinking_toggle(want_thinking=False)
+            self._variant_set = True
+            if model_version:
+                self._model_version = model_version
+            return
+
+        # 处理需要打开模型选择器的情况：pro, custom (如 5.2instant, 5.2pro)
+        # 或者明确指定了 model_version 且不是 thinking/instant
+        if v in ("pro", "custom") or (model_version and model_version.lower() not in ("thinking", "instant")):
             opened = False
             for sel in self.MODEL_PICKER_BTN:
                 try:
@@ -435,12 +500,24 @@ class ChatGPTAdapter(SiteAdapter):
                 return
 
             # 构建匹配模式
-            if model_version and ("5.2" in model_version.lower() or "gpt-5" in model_version.lower()):
+            mv = (model_version or self._model_version or "").lower()
+            
+            # 关键修复：优先匹配 5.2 Instant
+            if "5.2instant" in mv or "5-2-instant" in mv or "5.2-instant" in mv:
+                # 匹配 5.2 Instant
+                pattern = re.compile(r"5[.\-]?2.*instant|instant.*5[.\-]?2|5[.\-]?2.*即时|即时.*5[.\-]?2", re.I)
+            elif "5.2pro" in mv or "5-2-pro" in mv or "5.2-pro" in mv or "gpt-5.2-pro" in mv:
                 # 匹配 5.2 Pro 或 GPT-5 相关模型
                 pattern = re.compile(r"5[.\-]?2|gpt[.\-]?5|\bpro\b|专业|Professional", re.I)
-            elif model_version and "4o" in model_version.lower():
+            elif "5.2" in mv or "gpt-5" in mv:
+                # 匹配 5.2 相关模型（默认 Pro）
+                pattern = re.compile(r"5[.\-]?2|gpt[.\-]?5|\bpro\b|专业|Professional", re.I)
+            elif "4o" in mv or "4-o" in mv:
                 # 匹配 GPT-4o
                 pattern = re.compile(r"4[.\-]?o|gpt[.\-]?4", re.I)
+            elif "instant" in mv:
+                # 匹配 Instant（单独的 instant 已经在上面处理了，这里是兜底）
+                pattern = re.compile(r"\binstant\b|即时|Instant", re.I)
             else:
                 # 默认匹配 Pro
                 pattern = re.compile(r"\bPro\b|专业|Professional", re.I)
