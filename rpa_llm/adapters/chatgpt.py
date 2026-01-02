@@ -564,7 +564,27 @@ class ChatGPTAdapter(SiteAdapter):
             )
             return True
         except Exception:
-            return False
+            pass
+        
+        # C) stop button 出现（快速检查）
+        try:
+            combined_stop_sel = ", ".join(self.STOP_BTN)
+            await self.page.wait_for_function(
+                """(sel) => {
+                  const els = document.querySelectorAll(sel);
+                  for (let el of els) {
+                    if (el.offsetParent !== null) return true;
+                  }
+                  return false;
+                }""",
+                combined_stop_sel,
+                timeout=min(timeout_ms, 800),  # stop button 检查最多 0.8 秒
+            )
+            return True
+        except Exception:
+            pass
+        
+        return False
 
     async def _trigger_send_fast(self, user0: int) -> None:
         """
@@ -575,18 +595,31 @@ class ChatGPTAdapter(SiteAdapter):
             user0: 发送前的用户消息数量
         """
         # 使用 page.keyboard.press，避免 Locator.press() 的 actionability 等待
+        self._log("send: pressing Control+Enter (fast path)...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 快速确认（1.5秒超时）
-        if await self._fast_send_confirm(user0, timeout_ms=1500):
+        # 立即检查（0.1秒等待，让事件触发）
+        await asyncio.sleep(0.1)
+        
+        # 快速确认（1.2秒超时，减少等待时间）
+        if await self._fast_send_confirm(user0, timeout_ms=1200):
+            self._log("send: fast path confirmed (first attempt)")
+            return
+        
+        # 如果立即检查失败，再等待 0.2 秒后检查一次
+        await asyncio.sleep(0.2)
+        if await self._fast_send_confirm(user0, timeout_ms=1000):
+            self._log("send: fast path confirmed (after short wait)")
             return
         
         # 兜底：再按一次 Control+Enter
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
+        await asyncio.sleep(0.1)
         
-        # 再次确认（1.5秒超时）
-        if await self._fast_send_confirm(user0, timeout_ms=1500):
+        # 再次确认（1.2秒超时）
+        if await self._fast_send_confirm(user0, timeout_ms=1200):
+            self._log("send: fast path confirmed (second attempt)")
             return
         
         # 如果还是失败，抛出异常（让上层处理）
@@ -1190,7 +1223,16 @@ class ChatGPTAdapter(SiteAdapter):
         
         # P0优化：使用快路径发送（page.keyboard.press + wait_for_function 确认）
         # 这比 Locator.press() + 复杂并行检查快得多，且避免 Future exception
+        # 优化：确保 textbox 有焦点，然后立即发送
         try:
+            # 确保 textbox 有焦点（避免 Control+Enter 无效）
+            try:
+                tb_loc = self.page.locator('div[id="prompt-textarea"]').first
+                if await tb_loc.count() > 0:
+                    await tb_loc.focus(timeout=1000)
+            except Exception:
+                pass  # focus 失败不影响继续
+            
             self._log("send: using fast path (Control+Enter + wait_for_function)...")
             await self._trigger_send_fast(user_count_before_send)
             send_duration = time.time() - send_phase_start
