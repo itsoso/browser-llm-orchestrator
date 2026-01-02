@@ -98,10 +98,56 @@ python -m rpa_llm.chatlog_automation \
 - `--base-path` (可选): Obsidian 基础路径，默认 `~/work/personal/obsidian/personal/10_Sources/WeChat`
 - `--template` (可选): Prompt 模板文件路径
 - `--driver-url` (可选): driver_server URL，默认从环境变量或 brief.yaml 读取
-- `--arbitrator-site` (可选): LLM 分析站点，默认 `gemini`
-- `--model-version` (可选): 模型版本，默认 `5.2pro`
-- `--task-timeout-s` (可选): 任务超时时间（秒），默认 600
+- `--arbitrator-site` (可选): LLM 分析站点，默认 `gemini`。可选值：`chatgpt`, `gemini`
+- `--model-version` (可选): 模型版本，默认 `5.2pro`（仅用于文件名，不影响实际模型选择）
+- `--task-timeout-s` (可选): 任务超时时间（秒），默认 600（10分钟）。对于 ChatGPT Pro 等需要长时间分析的模型，建议设置为 1200（20分钟）或更长
 - `--log-file` (可选): 日志文件路径，默认自动生成到 `logs/` 目录
+
+## 使用 ChatGPT-5.2-Pro
+
+要使用 ChatGPT-5.2-Pro 进行分析，需要：
+
+1. **设置站点为 chatgpt**：`--arbitrator-site chatgpt`
+2. **设置环境变量指定 Pro 版本**：`export CHATGPT_VARIANT=pro`
+3. **设置足够长的超时时间**：`--task-timeout-s 1200`（20分钟）或更长
+
+### 完整示例
+
+```bash
+# 设置环境变量（在运行命令前）
+export CHATGPT_VARIANT=pro
+
+# 运行自动化脚本
+python -m rpa_llm.chatlog_automation \
+  --chatlog-url http://127.0.0.1:5030 \
+  --talker "川群-2025" \
+  --start 2025-12-28 \
+  --end 2025-12-28 \
+  --arbitrator-site chatgpt \
+  --task-timeout-s 1200 \
+  --model-version 5.2pro
+```
+
+### 或者一行命令
+
+```bash
+CHATGPT_VARIANT=pro python -m rpa_llm.chatlog_automation \
+  --chatlog-url http://127.0.0.1:5030 \
+  --talker "川群-2025" \
+  --start 2025-12-28 \
+  --end 2025-12-28 \
+  --arbitrator-site chatgpt \
+  --task-timeout-s 1200 \
+  --model-version 5.2pro
+```
+
+### ChatGPT Variant 选项
+
+- `pro`: ChatGPT Pro 版本（推荐用于复杂分析）
+- `thinking`: ChatGPT Thinking 模式
+- `instant`: ChatGPT Instant 模式
+
+通过环境变量 `CHATGPT_VARIANT` 设置，默认为 `thinking`。
 
 ## 工作流程
 
