@@ -554,12 +554,13 @@ class ChatGPTAdapter(SiteAdapter):
         try:
             combined_user_sel = ", ".join(self.USER_MSG)
             await self.page.wait_for_function(
-                """(u0, sel) => {
+                """(args) => {
+                  const u0 = args.u0;
+                  const sel = args.sel;
                   const n = document.querySelectorAll(sel).length;
                   return n > u0;
                 }""",
-                user0,
-                combined_user_sel,
+                {"u0": user0, "sel": combined_user_sel},
                 timeout=timeout_ms,
             )
             return True
@@ -570,14 +571,15 @@ class ChatGPTAdapter(SiteAdapter):
         try:
             combined_stop_sel = ", ".join(self.STOP_BTN)
             await self.page.wait_for_function(
-                """(sel) => {
+                """(args) => {
+                  const sel = args.sel;
                   const els = document.querySelectorAll(sel);
                   for (let el of els) {
                     if (el.offsetParent !== null) return true;
                   }
                   return false;
                 }""",
-                combined_stop_sel,
+                {"sel": combined_stop_sel},
                 timeout=min(timeout_ms, 800),  # stop button 检查最多 0.8 秒
             )
             return True
@@ -1380,12 +1382,13 @@ class ChatGPTAdapter(SiteAdapter):
             try:
                 combined_sel = ", ".join(self.ASSISTANT_MSG)
                 await self.page.wait_for_function(
-                    """(n0, sel) => {
+                    """(args) => {
+                        const n0 = args.n0;
+                        const sel = args.sel;
                         const n = document.querySelectorAll(sel).length;
                         return n > n0;
                     }""",
-                    n_assist0,
-                    combined_sel,
+                    {"n0": n_assist0, "sel": combined_sel},
                     timeout=assistant_wait_timeout * 1000  # wait_for_function 使用毫秒
                 )
                 # 等待成功后，获取实际的 assistant_count
@@ -1553,7 +1556,9 @@ class ChatGPTAdapter(SiteAdapter):
                     # 使用 JS evaluate 获取长度和哈希（不传输完整文本）
                     combined_sel = ", ".join(self.ASSISTANT_MSG)
                     result = await self.page.evaluate(
-                        """(sel, idx) => {
+                        """(args) => {
+                            const sel = args.sel;
+                            const idx = args.idx;
                             const els = document.querySelectorAll(sel);
                             if (idx < 0 || idx >= els.length) return {len: 0, hash: ''};
                             const el = els[idx];
@@ -1567,8 +1572,7 @@ class ChatGPTAdapter(SiteAdapter):
                             }
                             return {len: len, hash: hash.toString(36)};
                         }""",
-                        combined_sel,
-                        target_index
+                        {"sel": combined_sel, "idx": target_index}
                     )
                     
                     current_len = result.get("len", 0) if isinstance(result, dict) else 0
