@@ -370,7 +370,19 @@ async def run_automation(
             raw_file_path=raw_path,
         )
         
-        print(f"[{beijing_now_iso()}] [automation] ✓ Prompt 生成完成")
+        # 验证 prompt 中是否包含聊天内容
+        raw_content_preview = raw_content[:200] if len(raw_content) > 200 else raw_content
+        if raw_content_preview not in prompt and "{{conversation_content}}" not in prompt and "{conversation_content}" not in prompt:
+            # 检查是否至少包含一些聊天内容的关键词
+            has_content = any(keyword in prompt for keyword in ["对话", "聊天", "消息", "记录", "群聊", "王川"])
+            if not has_content:
+                print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: Prompt 中可能没有包含聊天内容")
+                print(f"[{beijing_now_iso()}] [automation] Raw 内容预览: {raw_content_preview[:100]}...")
+                print(f"[{beijing_now_iso()}] [automation] Prompt 预览: {prompt[:300]}...")
+            else:
+                print(f"[{beijing_now_iso()}] [automation] ✓ Prompt 生成完成（包含聊天内容关键词）")
+        else:
+            print(f"[{beijing_now_iso()}] [automation] ✓ Prompt 生成完成（长度: {len(prompt)} 字符）")
         
         # 步骤 4: 调用 LLM 分析
         if not driver_url:
