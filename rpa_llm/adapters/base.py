@@ -619,7 +619,10 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         # 优化：减少 _tb_kind 的超时时间
         try:
             kind = await asyncio.wait_for(self._tb_kind(tb), timeout=0.5)  # 从 1.0 秒减少到 0.5 秒
-        except (asyncio.TimeoutError, Exception):
+        except (asyncio.TimeoutError, Exception) as e:
+            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+            if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                raise RuntimeError(f"Browser/page closed during _tb_kind: {e}") from e
             kind = "unknown"
         
         # 优化：减少 focus 超时时间
