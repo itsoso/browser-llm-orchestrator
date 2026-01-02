@@ -1325,181 +1325,65 @@ class ChatGPTAdapter(SiteAdapter):
             await self._send_prompt(prompt)
             self._log(f"ask: send phase done ({time.time()-t_send:.2f}s)")
 
-            # 优化：移除冗余的 confirm phase，直接进入等待 assistant 消息
-            # 策略：通过 assistant_count 增加或内容变动来反向推断发送成功
-            # 实现"信号竞争"机制：同时监听多个信号（assistant_count、stop button、textbox cleared），谁先到就算谁
-            self._log("ask: waiting for assistant message (using signal race confirmation)...")
+            # P1优化：等待 assistant 消息出现（使用 wait_for_function 事件驱动，替代轮询）
+            self._log("ask: waiting for assistant message (using wait_for_function event-driven)...")
             t1 = time.time()
-            hb = t1
             elapsed = time.time() - ask_start_time
             remaining = timeout_s - elapsed
-            assist_timeout_streak = 0
-            # 优化：快速检查一次，确定超时时间
+            assistant_wait_timeout = min(remaining * 0.4, 90)  # 最多90秒
+            n_assist1 = n_assist0
+            
+            # P1优化：使用 wait_for_function 直接等待 assistant_count 增加（事件驱动）
+            # 这比轮询快得多，且避免 Future exception 和轮询开销
             try:
-                n_assist_quick_check = await asyncio.wait_for(self._assistant_count(), timeout=0.8)
-                if n_assist_quick_check > n_assist0:
-                    assistant_wait_timeout = min(remaining * 0.3, 40)  # 最多40秒
-                else:
-                    assistant_wait_timeout = min(remaining * 0.4, 90)  # 最多90秒
-            except Exception:
-                assistant_wait_timeout = min(remaining * 0.4, 90)
-            
-            n_assist1 = n_assist0  # 初始化
-            send_confirmed = False  # 标记是否已确认发送成功
-            
-            # 优化：实现"信号竞争"机制，同时监听多个信号，谁先到就算谁
-            while time.time() - t1 < assistant_wait_timeout:
-                elapsed = time.time() - ask_start_time
-                if elapsed >= timeout_s - 30:
-                    self._log(f"ask: timeout approaching (elapsed={elapsed:.1f}s/{timeout_s}s), breaking assistant wait")
-                    break
-                
-                # 优化：并行检查多个信号，实现"信号竞争"机制
-                async def check_assistant_count():
-                    try:
-                        return await asyncio.wait_for(self._assistant_count(), timeout=1.0)
-                    except (asyncio.TimeoutError, Exception):
-                        return None
-
-                async def check_assistant_selector():
-                    try:
-                        # Use nth(n_assist0) to wait for the next assistant message.
-                        sel = self.ASSISTANT_MSG[0]
-                        loc = self.page.locator(sel).nth(n_assist0)
-                        await loc.wait_for(state="visible", timeout=800)
-                        return "assistant_selector"
-                    except (asyncio.TimeoutError, Exception):
-                        return None
-                
-                async def check_stop_button():
-                    try:
-                        if await self._is_generating():
-                            return "stop_visible"
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    return None
-                
-                async def check_textbox_cleared():
-                    try:
-                        tb_loc = self.page.locator('div[id="prompt-textarea"]').first
-                        if await tb_loc.count() > 0:
-                            text_now = await asyncio.wait_for(self._tb_get_text(tb_loc), timeout=0.3)
-                            if text_now is not None and text_now.strip() == "":
-                                return "textbox_cleared"
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    return None
-                
-                async def check_text_change():
-                    try:
-                        text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.6)
-                        if text_quick and text_quick != last_assist_text_before:
-                            return "text_changed"
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    return None
-                
-                # 并行执行所有检查
-                try:
-                    results = await asyncio.wait_for(
-                        asyncio.gather(
-                            check_assistant_count(),
-                            check_assistant_selector(),
-                            check_stop_button(),
-                            check_textbox_cleared(),
-                            check_text_change(),
-                            return_exceptions=True
-                        ),
-                        timeout=1.2  # 总超时 1.2 秒
-                    )
-                    
-                    # 检查 assistant_count（最可靠的信号）
-                    if results[0] is not None and isinstance(results[0], int):
-                        n_assist1 = results[0]
-                        if n_assist1 > n_assist0:
-                            self._log(f"ask: assistant_count(after)={n_assist1} (new message, signal: assistant_count)")
-                            send_confirmed = True
-                            break
-
-                    # selector-based detection (fast path)
-                    if isinstance(results[1], str) and results[1] == "assistant_selector":
-                        try:
-                            n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.8)
-                            if n_assist1 <= n_assist0:
-                                n_assist1 = n_assist0 + 1
-                        except Exception:
-                            n_assist1 = n_assist0 + 1
-                        self._log("ask: assistant selector signaled new message")
-                        send_confirmed = True
-                        break
-                    
-                    # 检查其他信号（stop button、textbox cleared、text change）
-                    for i, result in enumerate(results[2:], 2):
-                        if isinstance(result, str) and result:
-                            signal_names = ["stop_button", "textbox_cleared", "text_change"]
-                            self._log(f"ask: send confirmed via {signal_names[i-2]} (signal: {result})")
-                            send_confirmed = True
-                            # 如果检测到 stop button 或 textbox cleared，也尝试获取 assistant_count
-                            if i <= 3:  # stop_button 或 textbox_cleared
-                                try:
-                                    n_assist1_check = await asyncio.wait_for(self._assistant_count(), timeout=0.8)
-                                    if n_assist1_check > n_assist0:
-                                        n_assist1 = n_assist1_check
-                                        self._log(f"ask: assistant_count also increased to {n_assist1}")
-                                        break
-                                except Exception:
-                                    pass
-                            break
-                except (asyncio.TimeoutError, Exception):
-                    assist_timeout_streak += 1
-                    # 如果并行检查超时，降级为顺序检查
-                    try:
-                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
-                        if n_assist1 > n_assist0:
-                            self._log(f"ask: assistant_count(after)={n_assist1} (new message)")
-                            send_confirmed = True
-                            break
-                    except (asyncio.TimeoutError, Exception):
-                        assist_timeout_streak += 1
-                        if assist_timeout_streak % 4 == 0:
-                            self._log("ask: assistant_count() timeout, retrying...")
-                
-                # 超时过多，降级为文本变化检测
-                if assist_timeout_streak >= 2 and not send_confirmed:
-                    try:
-                        text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.8)
-                        if text_quick and text_quick != last_assist_text_before:
-                            self._log("ask: assistant_count timeout streak, using text change as signal")
-                            # 修复 Bug 1: 重新查询实际的 assistant_count
-                            try:
-                                n_assist1_actual = await asyncio.wait_for(self._assistant_count(), timeout=1.5)
-                                if n_assist1_actual > n_assist0:
-                                    n_assist1 = n_assist1_actual
-                                    self._log(f"ask: re-queried assistant_count after timeout streak: {n_assist1} (actual)")
-                                else:
-                                    n_assist1 = n_assist0 + 1
-                                    self._log(f"ask: re-query failed, using synthetic count: {n_assist1}")
-                            except Exception:
-                                n_assist1 = n_assist0 + 1
-                                self._log(f"ask: re-query failed, using synthetic count: {n_assist1} (warning: may be inaccurate)")
-                            send_confirmed = True
-                            break
-                    except Exception:
-                        pass
-                
-                if time.time() - hb >= 10:
-                    elapsed = time.time() - ask_start_time
-                    self._log(f"ask: still waiting assistant message... (elapsed={elapsed:.1f}s/{timeout_s}s)")
-                    hb = time.time()
-                
-                await asyncio.sleep(0.3)
-            else:
-                await self.save_artifacts("no_assistant_reply")
-                await self.manual_checkpoint(
-                    "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
-                    ready_check=self._ready_check_textbox,
-                    max_wait_s=min(60, timeout_s - elapsed - 5),
+                combined_sel = ", ".join(self.ASSISTANT_MSG)
+                await self.page.wait_for_function(
+                    """(n0, sel) => {
+                        const n = document.querySelectorAll(sel).length;
+                        return n > n0;
+                    }""",
+                    n_assist0,
+                    combined_sel,
+                    timeout=assistant_wait_timeout * 1000  # wait_for_function 使用毫秒
                 )
+                # 等待成功后，获取实际的 assistant_count
+                n_assist1 = await self._assistant_count()
+                self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via wait_for_function)")
+            except Exception as e:
+                # wait_for_function 超时或失败，fallback 到快速检查
+                self._log(f"ask: wait_for_function timeout/error ({e}), falling back to quick check...")
+                try:
+                    n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
+                    if n_assist1 > n_assist0:
+                        self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
+                    else:
+                        # 如果计数没有增加，尝试检查文本变化
+                        try:
+                            text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.8)
+                            if text_quick and text_quick != last_assist_text_before:
+                                self._log("ask: text changed, assuming new message")
+                                n_assist1 = n_assist0 + 1  # 合成值
+                        except Exception:
+                            pass
+                except Exception:
+                    n_assist1 = n_assist0  # 保持原值
+                
+                # 如果仍然没有检测到新消息，触发 manual checkpoint
+                if n_assist1 <= n_assist0:
+                    await self.save_artifacts("no_assistant_reply")
+                    await self.manual_checkpoint(
+                        "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
+                        ready_check=self._ready_check_textbox,
+                        max_wait_s=min(60, timeout_s - elapsed - 5),
+                    )
+                    # manual_checkpoint 后再次检查
+                    try:
+                        n_assist1 = await self._assistant_count()
+                        if n_assist1 <= n_assist0:
+                            n_assist1 = n_assist0 + 1  # 合成值
+                    except Exception:
+                        n_assist1 = n_assist0 + 1
+            
             self._log(f"ask: assistant wait done ({time.time()-t1:.2f}s)")
 
             # 修复 Bug 1: 在使用 n_assist1 计算 target_index 之前，重新查询实际的 assistant_count
