@@ -431,24 +431,11 @@ async def run_synthesis_and_final(
     )
 
     topic_slug = slugify(brief.topic, max_len=40)  # 主题缩略，最多40字符
-    synth_path = vault_paths["synth"] / f"synthesis__{arbitrator_site}__{topic_slug}.md"
-    fm_s = {
-        "type": ["synthesis"],
-        "created": started_local,
-        "author": arbitrator_site,
-        "run_id": run_id,
-        "topic": brief.topic,
-        "url": url,
-        "started": started_local,
-        "ended": ended_local,
-        "duration_s": f"{dur:.3f}",
-        "tags": tags[:12],
-    }
-    write_markdown(synth_path, fm_s, answer)
-
+    # 优化：synthesis 和 final 内容相同，合并为一个文件，避免重复
+    # 使用 final 文件夹，因为它是最终结论
     final_path = vault_paths["final"] / f"final__{arbitrator_site}__{topic_slug}.md"
     fm_f = {
-        "type": ["final_decision"],
+        "type": ["synthesis", "final_decision"],  # 同时标记为 synthesis 和 final_decision
         "created": started_local,
         "author": arbitrator_site,
         "run_id": run_id,
