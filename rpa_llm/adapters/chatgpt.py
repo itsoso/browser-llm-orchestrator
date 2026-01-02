@@ -898,8 +898,14 @@ class ChatGPTAdapter(SiteAdapter):
                     # P0优化：使用条件等待替代固定 sleep
                     # 等待 textbox 可见且可交互（最多 1 秒）
                     try:
-                        await tb.wait_for(state="visible", timeout=1000)
-                    except Exception:
+                        await asyncio.wait_for(
+                            tb.wait_for(state="visible", timeout=1000),
+                            timeout=1.5  # 额外 0.5 秒缓冲
+                        )
+                    except (asyncio.TimeoutError, Exception) as e:
+                        # 优化：捕获所有异常，避免 Future exception
+                        if "TargetClosed" in str(e) or "Target page" in str(e):
+                            raise RuntimeError(f"Browser/page closed during wait_for visible: {e}") from e
                         pass  # 超时不影响继续
                     
                     # 优化：使用统一的清空方法，优先用户等价操作（Meta/Control+A → Backspace）
@@ -1126,14 +1132,33 @@ class ChatGPTAdapter(SiteAdapter):
                         # 只有在 type_success 为 False 时才尝试 type()
                         if not type_success:
                             try:
-                                await tb.type(prompt, delay=0, timeout=timeout_ms)
+                                # 优化：使用 asyncio.wait_for 包装，确保超时被正确处理，避免 Future exception
+                                await asyncio.wait_for(
+                                    tb.type(prompt, delay=0, timeout=timeout_ms),
+                                    timeout=timeout_ms / 1000.0 + 5.0  # 额外 5 秒缓冲
+                                )
                                 self._log(f"send: typed prompt (timeout={timeout_ms/1000:.1f}s)")
+                            except asyncio.TimeoutError:
+                                # asyncio.wait_for 超时，说明 type() 本身超时了
+                                self._log(f"send: type() timeout after {timeout_ms/1000:.1f}s (asyncio.wait_for)")
+                                raise RuntimeError(f"type() timeout after {timeout_ms/1000:.1f}s")
                             except PlaywrightError as pe:
-                                # 处理 Playwright 错误（包括 TargetClosedError）
+                                # 处理 Playwright 错误（包括 TargetClosedError 和 TimeoutError）
                                 if "TargetClosed" in str(pe) or "Target page" in str(pe):
                                     self._log(f"send: browser/page closed during type(), raising error")
                                     raise RuntimeError(f"Browser/page closed during input: {pe}") from pe
+                                if "Timeout" in str(pe) or "timeout" in str(pe).lower():
+                                    # 捕获 Playwright 的 TimeoutError，避免 Future exception
+                                    self._log(f"send: type() timeout: {pe}")
+                                    raise RuntimeError(f"type() timeout: {pe}") from pe
                                 raise  # 其他 Playwright 错误继续抛出
+                            except Exception as e:
+                                # 捕获所有其他异常，避免 Future exception
+                                if "TargetClosed" in str(e) or "Target page" in str(e):
+                                    raise RuntimeError(f"Browser/page closed during input: {e}") from e
+                                if "Timeout" in str(e) or "timeout" in str(e).lower():
+                                    raise RuntimeError(f"type() timeout: {e}") from e
+                                raise  # 其他异常继续抛出
                         
                         # type() 完成后立即检查是否已经发送（可能因为其他原因导致提前发送）
                         await asyncio.sleep(0.2)  # 减少等待时间，更快检测
@@ -1506,9 +1531,28 @@ class ChatGPTAdapter(SiteAdapter):
                         self._log(f"send: confirmed sent just before clicking {send_sel}")
                         return
                     
-                    await btn.wait_for(state="visible", timeout=1000)
+                    try:
+                        await asyncio.wait_for(
+                            btn.wait_for(state="visible", timeout=1000),
+                            timeout=1.5  # 额外 0.5 秒缓冲
+                        )
+                    except (asyncio.TimeoutError, Exception) as e:
+                        # 优化：捕获所有异常，避免 Future exception
+                        if "TargetClosed" in str(e) or "Target page" in str(e):
+                            raise RuntimeError(f"Browser/page closed during wait_for button: {e}") from e
+                        # 超时不影响继续，直接尝试点击
+                        pass
                     self._log(f"send: clicking send button {send_sel}...")
-                    await btn.click(timeout=3000)
+                    try:
+                        await asyncio.wait_for(
+                            btn.click(timeout=3000),
+                            timeout=3.5  # 额外 0.5 秒缓冲
+                        )
+                    except (asyncio.TimeoutError, Exception) as e:
+                        # 优化：捕获所有异常，避免 Future exception
+                        if "TargetClosed" in str(e) or "Target page" in str(e):
+                            raise RuntimeError(f"Browser/page closed during button click: {e}") from e
+                        raise  # 其他异常继续抛出
                     self._log(f"send: clicked send button {send_sel}")
                     # 按钮点击后也检查是否发送成功
                     await asyncio.sleep(0.2)

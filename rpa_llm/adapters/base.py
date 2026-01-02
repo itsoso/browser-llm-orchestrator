@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 from playwright.async_api import BrowserContext, Locator, Page, async_playwright
+from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
 
 from ..utils import beijing_now_iso, utc_now_iso
 
@@ -678,11 +679,21 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 raise RuntimeError(f"Browser/page closed during evaluate: {e}") from e
             # 最后 fallback 到 type()，但也要添加超时
             try:
-                await asyncio.wait_for(tb.type(text, delay=0), timeout=6.0)  # 从 8.0 秒减少到 6.0 秒
+                # 优化：使用 asyncio.wait_for 包装，确保超时被正确处理，避免 Future exception
+                await asyncio.wait_for(
+                    tb.type(text, delay=0, timeout=6000),  # 6 秒超时（毫秒）
+                    timeout=11.0  # 额外 5 秒缓冲
+                )
+            except asyncio.TimeoutError:
+                # asyncio.wait_for 超时
+                raise RuntimeError("_tb_set_text: type() timeout (asyncio.wait_for)")
             except (asyncio.TimeoutError, Exception) as type_err:
                 # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
                 if "TargetClosed" in str(type_err) or "Target page" in str(type_err) or "Target context" in str(type_err):
                     raise RuntimeError(f"Browser/page closed during type: {type_err}") from type_err
+                # 优化：如果是 TimeoutError，也捕获，避免 Future exception
+                if "Timeout" in str(type_err) or "timeout" in str(type_err).lower():
+                    raise RuntimeError(f"_tb_set_text: type() timeout: {type_err}") from type_err
                 raise RuntimeError(f"_tb_set_text: all methods failed: {type_err}")
 
     async def try_click(self, selectors: List[str], timeout_ms: int = 1500) -> bool:
