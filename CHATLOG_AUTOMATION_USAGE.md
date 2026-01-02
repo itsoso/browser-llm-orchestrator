@@ -30,9 +30,81 @@
                     └── {talker} 第{week}周-{date_range}-Sum-{version}.md
 ```
 
+## 配置文件
+
+### 创建配置文件
+
+复制示例配置文件并修改：
+
+```bash
+cp chatlog_automation.yaml.example chatlog_automation.yaml
+```
+
+编辑 `chatlog_automation.yaml`，设置常用参数：
+
+```yaml
+# Chatlog 服务配置
+chatlog:
+  url: "http://127.0.0.1:5030"
+
+# LLM 分析配置
+llm:
+  arbitrator_site: "chatgpt"
+  model_version: "5.2pro"
+  task_timeout_s: 1200  # 20分钟
+
+# Obsidian 路径配置
+obsidian:
+  base_path: "~/work/personal/obsidian/personal/10_Sources/WeChat"
+  template: "./templates/chatlog_analysis.md"
+```
+
+### 使用配置文件
+
+配置好文件后，运行命令时只需提供必需参数：
+
+```bash
+# 使用默认配置文件（chatlog_automation.yaml）
+python -m rpa_llm.chatlog_automation \
+  --talker "川群-2025" \
+  --start 2025-12-28 \
+  --end 2025-12-28
+
+# 使用自定义配置文件
+python -m rpa_llm.chatlog_automation \
+  --config ./my_config.yaml \
+  --talker "川群-2025" \
+  --start 2025-12-28 \
+  --end 2025-12-28
+```
+
+### 参数优先级
+
+参数优先级：**命令行参数 > 配置文件 > 默认值**
+
+例如，即使配置文件中设置了 `task_timeout_s: 1200`，也可以通过命令行覆盖：
+
+```bash
+python -m rpa_llm.chatlog_automation \
+  --talker "川群-2025" \
+  --start 2025-12-28 \
+  --end 2025-12-28 \
+  --task-timeout-s 1800  # 覆盖配置文件中的值
+```
+
 ## 使用示例
 
-### 基本用法
+### 基本用法（使用配置文件）
+
+```bash
+# 使用配置文件中的参数
+python -m rpa_llm.chatlog_automation \
+  --talker "川群-2025" \
+  --start 2025-12-28 \
+  --end 2025-12-28
+```
+
+### 不使用配置文件（所有参数通过命令行）
 
 ```bash
 python -m rpa_llm.chatlog_automation \
@@ -91,17 +163,20 @@ python -m rpa_llm.chatlog_automation \
 
 ## 参数说明
 
-- `--chatlog-url` (必填): chatlog 服务地址
+- `--config` (可选): 配置文件路径，默认 `chatlog_automation.yaml`
+- `--chatlog-url` (可选): chatlog 服务地址，可通过配置文件提供
 - `--talker` (必填): 聊天对象标识
 - `--start` (必填): 开始日期，格式为 YYYY-MM-DD
 - `--end` (必填): 结束日期，格式为 YYYY-MM-DD
-- `--base-path` (可选): Obsidian 基础路径，默认 `~/work/personal/obsidian/personal/10_Sources/WeChat`
-- `--template` (可选): Prompt 模板文件路径
-- `--driver-url` (可选): driver_server URL，默认从环境变量或 brief.yaml 读取
-- `--arbitrator-site` (可选): LLM 分析站点，默认 `gemini`。可选值：`chatgpt`, `gemini`
-- `--model-version` (可选): 模型版本，默认 `5.2pro`（仅用于文件名，不影响实际模型选择）
-- `--task-timeout-s` (可选): 任务超时时间（秒），默认 600（10分钟）。对于 ChatGPT Pro 等需要长时间分析的模型，建议设置为 1200（20分钟）或更长
-- `--log-file` (可选): 日志文件路径，默认自动生成到 `logs/` 目录
+- `--base-path` (可选): Obsidian 基础路径，可通过配置文件提供
+- `--template` (可选): Prompt 模板文件路径，可通过配置文件提供
+- `--driver-url` (可选): driver_server URL，可通过配置文件提供，或从环境变量或 brief.yaml 读取
+- `--arbitrator-site` (可选): LLM 分析站点，可通过配置文件提供，默认 `gemini`。可选值：`chatgpt`, `gemini`
+- `--model-version` (可选): 模型版本，可通过配置文件提供，默认 `5.2pro`（仅用于文件名，不影响实际模型选择）
+- `--task-timeout-s` (可选): 任务超时时间（秒），可通过配置文件提供，默认 600（10分钟）。对于 ChatGPT Pro 等需要长时间分析的模型，建议设置为 1200（20分钟）或更长
+- `--log-file` (可选): 日志文件路径，可通过配置文件提供，默认自动生成到 `logs/` 目录
+
+**注意**：如果使用配置文件，大部分参数都可以在配置文件中设置，命令行只需提供 `--talker`, `--start`, `--end` 等必需参数。
 
 ## 使用 ChatGPT-5.2-Pro
 

@@ -17,7 +17,7 @@ llm:
 # Obsidian 路径配置
 obsidian:
   base_path: "~/work/personal/obsidian/personal/10_Sources/WeChat"  # Obsidian 基础路径
-  template: "./templates/chatlog_analysis.md"  # Prompt 模板文件路径（可选）
+  template: "./templates/chatlog_for_wechat.md"  # Prompt 模板文件路径（可选）
 
 # Driver Server 配置
 driver:
