@@ -226,7 +226,7 @@ async def analyze_chatlog_conversations(
                                 "url": url,
                                 "tags": tags[:12],
                             },
-                            model_output_note_body(task.prompt, answer, url)
+                            model_output_note_body(task.prompt, answer)
                         )
                         print(f"[{beijing_now_iso()}] [chatlog] ✓ {task.site_id} 分析完成: {conv_title}")
                     except Exception as e:
