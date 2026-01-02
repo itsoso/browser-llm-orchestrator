@@ -12,7 +12,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -116,6 +116,7 @@ async def run_site_worker(
     sem: asyncio.Semaphore | None = None,
     driver_url: str | None = None,
     task_timeout_s: int = 1200,
+    model_version: Optional[str] = None,
 ) -> List[ModelResult]:
     results: List[ModelResult] = []
     driver_url = (driver_url or "").strip() or None
@@ -152,7 +153,7 @@ async def run_site_worker(
                 print(f"[{beijing_now_iso()}] [{site_id}] staggered start delay (3s) for task {idx}", flush=True)
 
             try:
-                payload = await asyncio.to_thread(driver_run_task, driver_url, site_id, t.prompt, task_timeout_s)
+                payload = await asyncio.to_thread(driver_run_task, driver_url, site_id, t.prompt, task_timeout_s, model_version)
                 ok = bool(payload.get("ok"))
                 answer = payload.get("answer") or ""
                 url = payload.get("url") or ""
@@ -520,10 +521,15 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
             site_durations[site_id] = max(0.0, site_t1 - site_t0)
             raise e
     
+    # 从 brief.yaml 读取每个站点的 model_version 配置
+    # 支持格式：output.site_model_versions: { "chatgpt": "5.2pro", "gemini": "..." }
+    site_model_versions = brief.output.get("site_model_versions", {})
+    
     # 构建 coros，同时处理延迟启动和耗时记录
     coros = []
     for idx, (site_id, ts) in enumerate(site_map.items()):
         delay_s = max(0.0, stagger_start_s * idx)
+        model_version = site_model_versions.get(site_id)  # 获取该站点的模型版本
         coros.append(
             _run_with_delay_and_timing(
                 site_id=site_id,
@@ -539,6 +545,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
                     sem=sem,
                     driver_url=driver_url,
                     task_timeout_s=task_timeout_s,
+                    model_version=model_version,
                 ),
             )
         )

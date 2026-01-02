@@ -324,6 +324,7 @@ async def run_automation(
             arbitrator_site,
             prompt,
             task_timeout_s,
+            model_version,  # 传递模型版本参数
         )
         
         ok = bool(payload.get("ok"))

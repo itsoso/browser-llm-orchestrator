@@ -42,7 +42,7 @@ class DriverServer:
     一个极简 HTTP server：
     - GET  /health
     - GET  /status
-    - POST /run_task  {"site_id": "...", "prompt": "...", "timeout_s": 1200}
+    - POST /run_task  {"site_id": "...", "prompt": "...", "timeout_s": 1200, "model_version": "5.2pro"}
     每个 site_id 常驻一个 adapter（Playwright persistent context），并用 lock 保证站点内串行。
     """
 
@@ -267,7 +267,15 @@ class DriverServer:
                                 await self._ensure_site(site_id)
                                 adapter = rt.adapter
                                 try:
-                                    answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+                                    # 尝试传递 model_version 参数（ChatGPT adapter 支持）
+                                    if model_version:
+                                        try:
+                                            answer, url = await adapter.ask(prompt, timeout_s=timeout_s, model_version=model_version)
+                                        except TypeError:
+                                            # 如果 adapter 不支持 model_version 参数，回退到只传 timeout_s
+                                            answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+                                    else:
+                                        answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
                                 except TypeError:
                                     answer, url = await adapter.ask(prompt)
                                 ok = True

@@ -102,14 +102,33 @@ class ChatGPTAdapter(SiteAdapter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._variant_set = False
+        self._model_version = None  # 存储当前请求的模型版本
 
     def _log(self, msg: str) -> None:
         print(f"[{beijing_now_iso()}] [{self.site_id}] {msg}", flush=True)
 
     def _desired_variant(self) -> str:
-        # CHATGPT_VARIANT=instant|thinking|pro
+        # 优先使用实例变量（从 ask 方法传入），其次使用环境变量
+        if self._model_version:
+            v = self._model_version.strip().lower()
+            # 支持多种格式：5.2pro, 5.2-pro, gpt-5.2-pro, pro, thinking, instant
+            if "5.2" in v or "pro" in v:
+                return "pro"
+            if "thinking" in v:
+                return "thinking"
+            if "instant" in v:
+                return "instant"
+            # 如果无法识别，返回原值（可能需要在 ensure_variant 中特殊处理）
+            return v
+        
+        # CHATGPT_VARIANT=instant|thinking|pro|5.2pro|gpt-5.2-pro
         v = (os.environ.get("CHATGPT_VARIANT") or "thinking").strip().lower()
-        return v if v in ("instant", "thinking", "pro") else "thinking"
+        if v in ("instant", "thinking", "pro"):
+            return v
+        # 支持 5.2pro, 5.2-pro, gpt-5.2-pro 等格式
+        if "5.2" in v or ("pro" in v and "thinking" not in v and "instant" not in v):
+            return "pro"
+        return "thinking"
 
     def _new_chat_enabled(self) -> bool:
         # CHATGPT_NEW_CHAT=1 才会每 task 点“新聊天”（更隔离，但更容易触发重绘抖动）
@@ -297,13 +316,46 @@ class ChatGPTAdapter(SiteAdapter):
             except (asyncio.TimeoutError, Exception):
                 continue
 
-    async def _select_model_menu_item(self, pattern: re.Pattern) -> bool:
+    async def _select_model_menu_item(self, pattern: re.Pattern, model_version: Optional[str] = None) -> bool:
+        """
+        从下拉菜单中选择模型
+        
+        Args:
+            pattern: 用于匹配模型名称的正则表达式
+            model_version: 可选的模型版本字符串（如 "5.2pro", "GPT-5", "GPT-4o"），用于更精确的匹配
+        
+        Returns:
+            是否成功选择模型
+        """
         candidates = [
             self.page.get_by_role("menuitem"),
             self.page.get_by_role("option"),
             self.page.locator("div[role='menuitem']"),
             self.page.locator("button"),
         ]
+        
+        # 如果提供了 model_version，构建更精确的匹配模式
+        if model_version:
+            model_version_lower = model_version.lower()
+            # 提取关键数字和关键词（如 "5.2", "pro", "gpt-4o"）
+            version_parts = []
+            if "5.2" in model_version_lower or "5-2" in model_version_lower:
+                version_parts.append(r"5[.\-]?2")
+            if "4o" in model_version_lower or "4-o" in model_version_lower:
+                version_parts.append(r"4[.\-]?o")
+            if "pro" in model_version_lower:
+                version_parts.append(r"\bpro\b|专业|Professional")
+            if "gpt" in model_version_lower:
+                version_parts.append(r"gpt")
+            
+            # 如果有关键部分，使用更精确的模式
+            if version_parts:
+                enhanced_pattern = re.compile("|".join(version_parts), re.I)
+            else:
+                enhanced_pattern = pattern
+        else:
+            enhanced_pattern = pattern
+        
         for c in candidates:
             try:
                 cnt = await c.count()
@@ -313,7 +365,19 @@ class ChatGPTAdapter(SiteAdapter):
                 try:
                     item = c.nth(i)
                     txt = (await item.inner_text()).strip()
-                    if txt and pattern.search(txt):
+                    if not txt:
+                        continue
+                    
+                    # 优先使用增强模式匹配
+                    if model_version and enhanced_pattern.search(txt):
+                        self._log(f"mode: selecting model '{txt}' (matched by enhanced pattern)")
+                        await item.click()
+                        await asyncio.sleep(0.6)
+                        return True
+                    
+                    # 回退到原始模式匹配
+                    if pattern.search(txt):
+                        self._log(f"mode: selecting model '{txt}' (matched by default pattern)")
                         await item.click()
                         await asyncio.sleep(0.6)
                         return True
@@ -321,21 +385,35 @@ class ChatGPTAdapter(SiteAdapter):
                     continue
         return False
 
-    async def ensure_variant(self) -> None:
+    async def ensure_variant(self, model_version: Optional[str] = None) -> None:
         """
-        best-effort：只设置一次
+        设置 ChatGPT 模型版本（best-effort，只设置一次）
+        
+        Args:
+            model_version: 模型版本字符串（如 "5.2pro", "GPT-5", "pro", "thinking", "instant"）
+                          如果提供，会优先使用此参数，而不是环境变量或实例变量
         """
-        if self._variant_set:
+        if self._variant_set and not model_version:
             return
+        
+        # 如果提供了 model_version 参数，临时设置到实例变量
+        original_model_version = self._model_version
+        if model_version:
+            self._model_version = model_version
+            self._variant_set = False  # 允许重新设置
+        
         v = self._desired_variant()
-        self._log(f"mode: desired={v}")
+        self._log(f"mode: desired={v}, model_version={model_version or self._model_version or 'env'}")
 
         if v in ("thinking", "instant"):
             await self._set_thinking_toggle(want_thinking=(v == "thinking"))
             self._variant_set = True
+            if model_version:
+                self._model_version = model_version  # 保存到实例变量
             return
 
-        if v == "pro":
+        # 处理 pro 模式或自定义模型版本
+        if v == "pro" or (model_version and model_version.lower() not in ("thinking", "instant")):
             opened = False
             for sel in self.MODEL_PICKER_BTN:
                 try:
@@ -352,12 +430,34 @@ class ChatGPTAdapter(SiteAdapter):
                 # 找不到模型选择器，不阻塞
                 self._log("mode: model picker not found; skip")
                 self._variant_set = True
+                if model_version:
+                    self._model_version = model_version
                 return
 
-            ok = await self._select_model_menu_item(re.compile(r"\bPro\b|专业|Professional", re.I))
+            # 构建匹配模式
+            if model_version and ("5.2" in model_version.lower() or "gpt-5" in model_version.lower()):
+                # 匹配 5.2 Pro 或 GPT-5 相关模型
+                pattern = re.compile(r"5[.\-]?2|gpt[.\-]?5|\bpro\b|专业|Professional", re.I)
+            elif model_version and "4o" in model_version.lower():
+                # 匹配 GPT-4o
+                pattern = re.compile(r"4[.\-]?o|gpt[.\-]?4", re.I)
+            else:
+                # 默认匹配 Pro
+                pattern = re.compile(r"\bPro\b|专业|Professional", re.I)
+            
+            ok = await self._select_model_menu_item(pattern, model_version=model_version or self._model_version)
             if not ok:
-                self._log("mode: cannot auto-select Pro; skip")
+                self._log(f"mode: cannot auto-select model (version={model_version or self._model_version}); skip")
+            else:
+                self._log(f"mode: successfully selected model (version={model_version or self._model_version})")
             self._variant_set = True
+            if model_version:
+                self._model_version = model_version
+            return
+        
+        # 恢复原始 model_version（如果提供了临时参数）
+        if model_version:
+            self._model_version = original_model_version
 
     async def ensure_ready(self) -> None:
         self._log("ensure_ready: start")
@@ -1835,22 +1935,32 @@ class ChatGPTAdapter(SiteAdapter):
         # 如果所有方法都尝试过了，不报错（因为 Enter 或 Control+Enter 可能已经生效）
         self._log("send: all send methods attempted (Enter/Control+Enter/Button)")
 
-    async def ask(self, prompt: str, timeout_s: int = 1200) -> Tuple[str, str]:
+    async def ask(self, prompt: str, timeout_s: int = 1200, model_version: Optional[str] = None) -> Tuple[str, str]:
         """
         发送 prompt 并等待回复。
+        
+        Args:
+            prompt: 要发送的提示词
+            timeout_s: 超时时间（秒）
+            model_version: 模型版本（如 "5.2pro", "GPT-5", "pro", "thinking", "instant"）
+                          如果提供，会在发送前自动切换到指定模型
         
         使用整体超时保护，确保不会无限等待。
         超时后会抛出 TimeoutError 异常。
         """
         async def _ask_inner() -> Tuple[str, str]:
             ask_start_time = time.time()
-            self._log(f"ask: start (timeout={timeout_s}s)")
+            self._log(f"ask: start (timeout={timeout_s}s, model_version={model_version or 'default'})")
+            
+            # 如果提供了 model_version，设置到实例变量
+            if model_version:
+                self._model_version = model_version
             
             t_ready = time.time()
             await self.ensure_ready()
             self._log(f"ask: ensure_ready done ({time.time()-t_ready:.2f}s)")
             t_variant = time.time()
-            await self.ensure_variant()
+            await self.ensure_variant(model_version=model_version)
             self._log(f"ask: ensure_variant done ({time.time()-t_variant:.2f}s)")
             
             # 优化：针对 Thinking 模式的 DOM 稳定逻辑
