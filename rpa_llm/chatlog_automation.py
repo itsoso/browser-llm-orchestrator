@@ -25,39 +25,42 @@ from .vault import write_markdown
 
 def get_week_number(date: datetime) -> int:
     """
-    获取日期在当月是第几周（周一开始）
+    获取日期在该年份是第几周（周一开始）
     
     计算逻辑：
-    1. 找到该月第一天
-    2. 计算该日期是当月的第几天
-    3. 根据该月第一天是星期几，计算该日期是当月的第几周
+    1. 找到该年份的第一天（1月1日）
+    2. 计算该日期是该年的第几天
+    3. 根据该年第一天是星期几，计算该日期是该年的第几周
+    
+    注意：使用该日期所在年份的周数，而不是 ISO 年份的周数。
+    例如：2025-12-30 属于 2025 年的第 53 周，而不是 2026 年的第 1 周。
     
     Args:
         date: 日期对象
     
     Returns:
-        该日期在当月是第几周（1-6）
+        该日期在该年份是第几周（1-53）
     
     Examples:
-        >>> get_week_number(datetime(2025, 12, 1))  # 12月1日（周一）
+        >>> get_week_number(datetime(2025, 1, 1))  # 2025年1月1日
         1
-        >>> get_week_number(datetime(2025, 12, 30))  # 12月30日（周二）
-        5
+        >>> get_week_number(datetime(2025, 12, 30))  # 2025年12月30日
+        53
     """
-    # 找到该月第一天
-    first_day = date.replace(day=1)
-    # 找到该月第一天是星期几（0=周一, 6=周日）
-    first_weekday = first_day.weekday()  # 0=周一, 6=周日
+    # 找到该年份的第一天
+    year_start = datetime(date.year, 1, 1)
+    # 找到该年份第一天是星期几（0=周一, 6=周日）
+    year_start_weekday = year_start.weekday()  # 0=周一, 6=周日
     
-    # 计算该日期是当月的第几天（从1开始）
-    day_of_month = date.day
+    # 计算该日期是该年的第几天（从1开始）
+    day_of_year = date.timetuple().tm_yday
     
-    # 计算该日期是当月的第几周
-    # 第一周：从该月第一天开始，到第一个周日结束（或到该周结束）
+    # 计算该日期是该年的第几周
+    # 第一周：从该年第一天开始，到第一个周日结束（或到该周结束）
     # 如果第一天是周一，那么第一周是第1-7天
     # 如果第一天是周二，那么第一周是第1-6天，第二周从第7天开始
-    # 公式：((day_of_month - 1 + first_weekday) // 7) + 1
-    week_number = ((day_of_month - 1 + first_weekday) // 7) + 1
+    # 公式：((day_of_year - 1 + year_start_weekday) // 7) + 1
+    week_number = ((day_of_year - 1 + year_start_weekday) // 7) + 1
     return week_number
 
 
