@@ -1156,36 +1156,38 @@ class ChatGPTAdapter(SiteAdapter):
                 pass
             return False
 
-        # 步骤 1: 尝试 Enter (最快)
-        try:
-            await tb.press("Enter", timeout=3000)
-            self._log("send: Enter pressed")
-            await asyncio.sleep(0.3)
-            if await check_if_sent("Enter"):
-                return
-        except Exception:
-            pass
-
-        # 给一点反应时间，如果 Enter 生效了，页面会刷新
-        await asyncio.sleep(0.5)
-        if await check_if_sent("Enter (after wait)"):
-            return
-
-        # 步骤 2: 尝试 Control+Enter (日志证明这是救世主)
+        # 优化：优先使用 Control+Enter（日志证明这是救世主，更可靠）
         # 很多时候 Enter 只是换行，Ctrl+Enter 才是强制提交
+        # 步骤 1: 优先尝试 Control+Enter（最可靠）
         try:
-            self._log("send: trying Control+Enter (reliable fallback)...")
+            self._log("send: trying Control+Enter first (most reliable)...")
             await tb.press("Control+Enter", timeout=3000)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)  # 减少等待时间，加快检测
             self._log("send: Control+Enter pressed")
             if await check_if_sent("Control+Enter"):
                 return
         except Exception:
             pass
 
-        # 再次检查是否已经发送（Control+Enter 可能已经生效）
-        await asyncio.sleep(0.5)
+        # 快速检查 Control+Enter 是否生效（减少等待时间）
+        await asyncio.sleep(0.3)  # 从 0.5s 减少到 0.3s
         if await check_if_sent("Control+Enter (after wait)"):
+            return
+
+        # 步骤 2: 如果 Control+Enter 没成功，尝试 Enter（作为备选）
+        try:
+            self._log("send: trying Enter as fallback...")
+            await tb.press("Enter", timeout=3000)
+            self._log("send: Enter pressed")
+            await asyncio.sleep(0.2)  # 减少等待时间
+            if await check_if_sent("Enter"):
+                return
+        except Exception:
+            pass
+
+        # 快速检查 Enter 是否生效
+        await asyncio.sleep(0.3)  # 从 0.5s 减少到 0.3s
+        if await check_if_sent("Enter (after wait)"):
             return
 
         if time.time() - send_phase_start >= send_phase_max_s:
