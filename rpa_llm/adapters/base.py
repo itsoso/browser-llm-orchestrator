@@ -492,7 +492,10 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 if (el.isContentEditable) return 'contenteditable';
                 return 'unknown';
             }""")
-        except Exception:
+        except Exception as e:
+            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+            if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                raise RuntimeError(f"Browser/page closed during _tb_kind: {e}") from e
             return "unknown"
 
     async def _tb_get_text(self, tb: Locator) -> str:
