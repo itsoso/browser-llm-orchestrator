@@ -45,8 +45,7 @@ def make_run_paths(vault_path: Path, root_dir: str, run_id: str) -> Dict[str, Pa
         "run_root": run_root,
         "raw": run_root / "00_raw",
         "model": run_root / "03_model_runs",
-        "synth": run_root / "04_synthesis",
-        "final": run_root / "05_final",
+        "final": run_root / "05_final",  # synthesis 和 final 合并为一个文件夹
     }
 
 
