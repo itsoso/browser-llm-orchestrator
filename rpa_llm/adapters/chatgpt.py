@@ -2168,7 +2168,7 @@ class ChatGPTAdapter(SiteAdapter):
         # 这样可以更快地检测到新消息，而不是等待 90 秒
         # 如果 20 秒内没有检测到，会立即检查文本变化，而不是继续等待
         assistant_wait_timeout = min(remaining * 0.2, 20)  # 最多20秒（从 15 秒增加到 20 秒，给 ChatGPT Pro 更多时间）
-            n_assist1 = n_assist0
+        n_assist1 = n_assist0
             
             # 关键修复：在开始等待之前，先检查一次 thinking 状态
             # 如果已经在思考，可以提前知道，避免不必要的等待
