@@ -1001,7 +1001,12 @@ class ChatGPTAdapter(SiteAdapter):
                             if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') {{
                                 const fullText = {json.dumps(prompt)};
                                 if (el.contentEditable === 'true') {{
+                                    // 修复：对于 contenteditable（ProseMirror），先清空再设置，避免残留内容
+                                    el.innerText = '';
+                                    el.textContent = '';
+                                    // 然后设置新文本
                                     el.innerText = fullText;
+                                    el.textContent = fullText;
                                 }} else {{
                                     el.value = fullText;
                                 }}
