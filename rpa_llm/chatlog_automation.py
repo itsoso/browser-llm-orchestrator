@@ -677,6 +677,11 @@ def main():
         
         # 读取 new_chat 参数（优先级：命令行参数 > 配置文件 > 默认值 False）
         new_chat = args.new_chat if args.new_chat else config.get("new_chat", False)
+        if new_chat:
+            print(f"[{beijing_now_iso()}] [automation] new_chat: True (每次提交都打开新窗口)")
+        
+        # 读取 new_chat 参数（优先级：命令行参数 > 配置文件 > 默认值 False）
+        new_chat = args.new_chat if args.new_chat else config.get("new_chat", False)
         
         asyncio.run(run_automation(
             chatlog_url=chatlog_url,
