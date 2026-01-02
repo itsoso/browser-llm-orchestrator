@@ -12,11 +12,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import yaml
 
 from rpa_llm.driver_server import DriverServer
+from rpa_llm.utils import beijing_now_iso
 
 
 def load_driver_config(brief_path: Path) -> dict:
@@ -63,6 +65,7 @@ async def main_async():
     ap.add_argument("--headless", action="store_true", help="覆盖配置中的 headless")
     ap.add_argument("--no-prewarm", action="store_true", help="禁用预热")
     ap.add_argument("--check-warmup", action="store_true", help="启动前检查是否需要预热（仅提示，不自动运行）")
+    ap.add_argument("--log-file", help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
     args = ap.parse_args()
 
     brief_path = Path(args.brief).expanduser().resolve()
@@ -70,6 +73,50 @@ async def main_async():
         print(f"错误: 找不到文件 {brief_path}", file=sys.stderr)
         sys.exit(1)
 
+    # 设置日志文件
+    if args.log_file:
+        log_file = Path(args.log_file).expanduser().resolve()
+    else:
+        # 自动生成日志文件路径：logs/driver_YYYYMMDD_HHMMSS.log
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = logs_dir / f"driver_{timestamp}.log"
+    
+    # 打开日志文件（追加模式）
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_file, "a", encoding="utf-8")
+    
+    # 创建 Tee 类，同时输出到控制台和文件
+    class Tee:
+        def __init__(self, *files):
+            self.files = files
+        
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()
+        
+        def flush(self):
+            for f in self.files:
+                f.flush()
+    
+    # 保存原始的 stdout 和 stderr
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    
+    # 创建 Tee 对象，同时输出到控制台和文件
+    tee_stdout = Tee(sys.stdout, log_fp)
+    tee_stderr = Tee(sys.stderr, log_fp)
+    
+    # 重定向 stdout 和 stderr
+    sys.stdout = tee_stdout
+    sys.stderr = tee_stderr
+    
+    # 输出日志文件路径
+    print(f"[driver] 日志文件: {log_file}")
+    print(f"[driver] 日志文件路径: {log_file.absolute()}")
+    
     # 从 brief.yaml 加载配置
     config = load_driver_config(brief_path)
     
@@ -130,8 +177,17 @@ async def main_async():
         except NotImplementedError:
             pass
 
-    await server.start()
-    await server._stop.wait()
+    try:
+        await server.start()
+        await server._stop.wait()
+    finally:
+        # 恢复原始的 stdout 和 stderr
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        # 关闭日志文件
+        log_fp.close()
+        # 输出日志文件路径到控制台（恢复后）
+        print(f"\n[driver] 日志已保存到: {log_file.absolute()}", file=original_stdout)
 
 
 def main():
