@@ -1009,7 +1009,7 @@ class ChatGPTAdapter(SiteAdapter):
                                 // 关键：按顺序触发所有状态更新事件
                                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                el.dispatchEvent(new InputEvent('beforeinput', {{ bubbles: true, inputType: 'insertText', data: '' }}));
+                                el.dispatchEvent(new InputEvent('beforeinput', {{ bubbles: true, inputType: 'insertText', data: fullText }}));
                                 el.dispatchEvent(new KeyboardEvent('keydown', {{ bubbles: true, key: 'Enter' }}));
                                 el.blur(); // 有时失焦能强制同步状态
                                 el.focus(); // 重新聚焦，确保按钮状态更新
@@ -1066,9 +1066,24 @@ class ChatGPTAdapter(SiteAdapter):
                         use_js_inject = False  # 如果 JS 注入失败，回退到 type()
                 
                 if not use_js_inject:
+                    # 修复：对于 ChatGPT（ProseMirror contenteditable），避免使用 type()，因为 type() 在 contenteditable 上不稳定
+                    # 检测元素类型，如果是 contenteditable，强制使用 JS 注入而不是 type()
+                    try:
+                        # 检测元素类型
+                        tb_kind = await self._tb_kind(tb)
+                        if tb_kind == "contenteditable":
+                            # 对于 contenteditable（ProseMirror），强制使用 JS 注入，避免 type() 导致的字符错乱
+                            self._log(f"send: detected contenteditable, forcing JS injection instead of type() to avoid character order issues...")
+                            use_js_inject = True  # 强制使用 JS 注入
+                            # 重新进入 JS 注入逻辑
+                            continue  # 跳出当前逻辑，重新进入 JS 注入分支
+                    except Exception:
+                        # 检测失败不影响继续，使用原有逻辑
+                        pass
+                    
                     # 优化：短 prompt 使用轻量路径（fill/execCommand），避免 type() 的延迟
                     # 策略 A: 对于短 prompt，优先使用 _tb_set_text (fill/execCommand)
-                    # 策略 B: 如果 _tb_set_text 失败，再尝试 type()
+                    # 策略 B: 如果 _tb_set_text 失败，再尝试 type()（仅限 textarea）
                     try:
                         # 确保元素可见和可交互
                         try:
@@ -1100,8 +1115,21 @@ class ChatGPTAdapter(SiteAdapter):
                                 self._log(f"send: browser/page closed during _tb_set_text, raising error")
                                 raise RuntimeError(f"Browser/page closed during _tb_set_text: {set_text_err}") from set_text_err
                             
-                            # 如果 _tb_set_text 失败，fallback 到 type()
+                            # 如果 _tb_set_text 失败，检查元素类型
+                            # 修复：对于 contenteditable（ProseMirror），不要使用 type()，而是使用 JS 注入
                             err_msg = str(set_text_err) if set_text_err else "timeout or unknown error"
+                            try:
+                                tb_kind = await self._tb_kind(tb)
+                                if tb_kind == "contenteditable":
+                                    # 对于 contenteditable，强制使用 JS 注入，避免 type() 导致的字符错乱
+                                    self._log(f"send: _tb_set_text failed ({err_msg}), but detected contenteditable, using JS injection instead of type()...")
+                                    use_js_inject = True  # 强制使用 JS 注入
+                                    # 重新进入 JS 注入逻辑
+                                    continue  # 跳出当前逻辑，重新进入 JS 注入分支
+                            except Exception:
+                                # 检测失败，继续原有逻辑
+                                pass
+                            
                             self._log(f"send: _tb_set_text failed ({err_msg}), trying type()...")
                             
                             # 修复：_tb_set_text 可能部分成功（输入了一部分内容），需要先清空，避免重复输入
