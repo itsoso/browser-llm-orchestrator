@@ -593,8 +593,10 @@ def main():
     parser.add_argument("--driver-url", default=None, help="driver_server URL（默认: 从环境变量或 brief.yaml 读取）")
     parser.add_argument("--arbitrator-site", default=None, help="LLM 分析站点（默认: gemini）")
     parser.add_argument("--model-version", default=None, help="模型版本（默认: 5.2pro）")
+    parser.add_argument("--model_version", default=None, help="模型版本（别名，等同于 --model-version）")
     parser.add_argument("--task-timeout-s", type=int, default=None, help="任务超时时间（秒，默认: 600）")
     parser.add_argument("--new-chat", action="store_true", help="每次提交 prompt 时都打开新窗口（新聊天）")
+    parser.add_argument("--new_chat", action="store_true", help="每次提交 prompt 时都打开新窗口（别名，等同于 --new-chat）")
     parser.add_argument("--log-file", default=None, help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
     
     args = parser.parse_args()
@@ -611,8 +613,9 @@ def main():
     base_path = args.base_path or config.get("obsidian", {}).get("base_path")
     template_path = args.template or config.get("obsidian", {}).get("template")
     driver_url = args.driver_url or config.get("driver", {}).get("url")
-    arbitrator_site = args.arbitrator_site or config.get("llm", {}).get("arbitrator_site", "gemini")
-    model_version = args.model_version or config.get("llm", {}).get("model_version", "5.2pro")
+        arbitrator_site = args.arbitrator_site or config.get("llm", {}).get("arbitrator_site", "gemini")
+        # 支持 --model-version 和 --model_version 两种格式
+        model_version = args.model_version or getattr(args, "model_version", None) or config.get("llm", {}).get("model_version", "5.2pro")
     task_timeout_s = args.task_timeout_s or config.get("llm", {}).get("task_timeout_s", 600)
     log_file = args.log_file or config.get("logging", {}).get("log_file")
     
@@ -695,12 +698,10 @@ def main():
         print(f"[{beijing_now_iso()}] [automation] task_timeout_s: {task_timeout_s}秒")
         
         # 读取 new_chat 参数（优先级：命令行参数 > 配置文件 > 默认值 False）
-        new_chat = args.new_chat if args.new_chat else config.get("new_chat", False)
+        # 支持 --new-chat 和 --new_chat 两种格式
+        new_chat = args.new_chat or getattr(args, "new_chat", False) or config.get("llm", {}).get("new_chat", False)
         if new_chat:
             print(f"[{beijing_now_iso()}] [automation] new_chat: True (每次提交都打开新窗口)")
-        
-        # 读取 new_chat 参数（优先级：命令行参数 > 配置文件 > 默认值 False）
-        new_chat = args.new_chat if args.new_chat else config.get("new_chat", False)
         
         asyncio.run(run_automation(
             chatlog_url=chatlog_url,
