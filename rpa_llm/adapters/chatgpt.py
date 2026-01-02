@@ -2066,7 +2066,7 @@ class ChatGPTAdapter(SiteAdapter):
         # 如果所有方法都尝试过了，不报错（因为 Enter 或 Control+Enter 可能已经生效）
         self._log("send: all send methods attempted (Enter/Control+Enter/Button)")
 
-    async def ask(self, prompt: str, timeout_s: int = 1200, model_version: Optional[str] = None) -> Tuple[str, str]:
+    async def ask(self, prompt: str, timeout_s: int = 1200, model_version: Optional[str] = None, new_chat: bool = False) -> Tuple[str, str]:
         """
         发送 prompt 并等待回复。
         
@@ -2075,13 +2075,15 @@ class ChatGPTAdapter(SiteAdapter):
             timeout_s: 超时时间（秒）
             model_version: 模型版本（如 "5.2pro", "GPT-5", "pro", "thinking", "instant"）
                           如果提供，会在发送前自动切换到指定模型
+            new_chat: 是否在新窗口中发送（每次提交都打开新聊天）
+                      如果为 True，会在发送前调用 new_chat() 方法
         
         使用整体超时保护，确保不会无限等待。
         超时后会抛出 TimeoutError 异常。
         """
         async def _ask_inner() -> Tuple[str, str]:
             ask_start_time = time.time()
-            self._log(f"ask: start (timeout={timeout_s}s, model_version={model_version or 'default'})")
+            self._log(f"ask: start (timeout={timeout_s}s, model_version={model_version or 'default'}, new_chat={new_chat})")
             
             # 如果提供了 model_version，设置到实例变量
             if model_version:
@@ -2114,8 +2116,9 @@ class ChatGPTAdapter(SiteAdapter):
                 # 稳定化失败不影响主流程，记录日志即可
                 self._log(f"ask: DOM stabilization warning: {e}")
 
-            # 是否每次新聊天（默认关闭，提高稳定性与速度）
-            if self._new_chat_enabled():
+            # 是否每次新聊天（优先使用参数，其次使用环境变量）
+            if new_chat or self._new_chat_enabled():
+                self._log("ask: creating new chat...")
                 await self.new_chat()
                 # 新聊天后输入框重建，重新确保 ready
                 await self.ensure_ready()

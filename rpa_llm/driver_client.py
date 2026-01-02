@@ -13,11 +13,13 @@ import urllib.error
 from typing import Any, Dict, Optional
 
 
-def run_task(driver_url: str, site_id: str, prompt: str, timeout_s: int = 1200, model_version: Optional[str] = None) -> Dict[str, Any]:
+def run_task(driver_url: str, site_id: str, prompt: str, timeout_s: int = 1200, model_version: Optional[str] = None, new_chat: bool = False) -> Dict[str, Any]:
     url = driver_url.rstrip("/") + "/run_task"
     payload = {"site_id": site_id, "prompt": prompt, "timeout_s": timeout_s}
     if model_version:
         payload["model_version"] = model_version
+    if new_chat:
+        payload["new_chat"] = new_chat
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json; charset=utf-8")

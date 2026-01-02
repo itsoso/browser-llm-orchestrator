@@ -368,6 +368,7 @@ async def run_automation(
     arbitrator_site: str = "gemini",
     model_version: str = "5.2pro",
     task_timeout_s: int = 600,
+    new_chat: bool = False,
 ):
     """
     运行完整的自动化流程
@@ -460,6 +461,7 @@ async def run_automation(
                 prompt,
                 task_timeout_s,
                 model_version,  # 传递模型版本参数
+                new_chat,  # 传递 new_chat 参数
             )
         except Exception as e:
             error_msg = str(e)
@@ -573,6 +575,7 @@ def main():
     parser.add_argument("--arbitrator-site", default=None, help="LLM 分析站点（默认: gemini）")
     parser.add_argument("--model-version", default=None, help="模型版本（默认: 5.2pro）")
     parser.add_argument("--task-timeout-s", type=int, default=None, help="任务超时时间（秒，默认: 600）")
+    parser.add_argument("--new-chat", action="store_true", help="每次提交 prompt 时都打开新窗口（新聊天）")
     parser.add_argument("--log-file", default=None, help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
     
     args = parser.parse_args()
@@ -672,6 +675,9 @@ def main():
         print(f"[{beijing_now_iso()}] [automation] model_version: {model_version}")
         print(f"[{beijing_now_iso()}] [automation] task_timeout_s: {task_timeout_s}秒")
         
+        # 读取 new_chat 参数（优先级：命令行参数 > 配置文件 > 默认值 False）
+        new_chat = args.new_chat if args.new_chat else config.get("new_chat", False)
+        
         asyncio.run(run_automation(
             chatlog_url=chatlog_url,
             talker=args.talker,
@@ -683,6 +689,7 @@ def main():
             arbitrator_site=arbitrator_site,
             model_version=model_version,
             task_timeout_s=task_timeout_s,
+            new_chat=new_chat,
         ))
     finally:
         sys.stdout = original_stdout

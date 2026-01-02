@@ -207,6 +207,7 @@ class DriverServer:
                 prompt = payload.get("prompt")
                 timeout_s = int(payload.get("timeout_s", 1200))
                 model_version = payload.get("model_version")  # 可选的模型版本参数
+                new_chat = payload.get("new_chat", False)  # 是否新开窗口
                 if not site_id or not prompt:
                     await self._write_json(writer, 400, {"ok": False, "error": "missing site_id or prompt"})
                     return
@@ -216,8 +217,9 @@ class DriverServer:
                 try:
                     plen = len(prompt) if isinstance(prompt, str) else -1
                     model_info = f" | model_version={model_version}" if model_version else ""
+                    new_chat_info = f" | new_chat={new_chat}" if new_chat else ""
                     print(
-                        f"[{beijing_now_iso()}] [driver] run_task recv | site={site_id} | prompt_len={plen} | timeout_s={timeout_s}{model_info}",
+                        f"[{beijing_now_iso()}] [driver] run_task recv | site={site_id} | prompt_len={plen} | timeout_s={timeout_s}{model_info}{new_chat_info}",
                         flush=True,
                     )
                 except Exception:
@@ -247,18 +249,26 @@ class DriverServer:
                     t0 = time.perf_counter()
 
                     try:
-                        # adapter.ask(prompt, timeout_s=..., model_version=...) 兼容 ChatGPT；其他 adapter 也支持这些参数则传入
+                        # adapter.ask(prompt, timeout_s=..., model_version=..., new_chat=...) 兼容 ChatGPT；其他 adapter 也支持这些参数则传入
                         adapter = rt.adapter
                         try:
-                            # 尝试传递 model_version 参数（ChatGPT adapter 支持）
+                            # 尝试传递 model_version 和 new_chat 参数（ChatGPT adapter 支持）
+                            kwargs = {"timeout_s": timeout_s}
                             if model_version:
+                                kwargs["model_version"] = model_version
+                            if new_chat:
+                                kwargs["new_chat"] = new_chat
+                            
+                            try:
+                                answer, url = await adapter.ask(prompt, **kwargs)
+                            except TypeError:
+                                # 如果 adapter 不支持某些参数，逐步回退
+                                kwargs.pop("new_chat", None)
                                 try:
-                                    answer, url = await adapter.ask(prompt, timeout_s=timeout_s, model_version=model_version)
+                                    answer, url = await adapter.ask(prompt, **kwargs)
                                 except TypeError:
-                                    # 如果 adapter 不支持 model_version 参数，回退到只传 timeout_s
-                                    answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
-                            else:
-                                answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+                                    kwargs.pop("model_version", None)
+                                    answer, url = await adapter.ask(prompt, **kwargs)
                         except TypeError:
                             answer, url = await adapter.ask(prompt)  # fallback
                         ok = True
@@ -277,15 +287,23 @@ class DriverServer:
                                 await self._ensure_site(site_id)
                                 adapter = rt.adapter
                                 try:
-                                    # 尝试传递 model_version 参数（ChatGPT adapter 支持）
+                                    # 尝试传递 model_version 和 new_chat 参数（ChatGPT adapter 支持）
+                                    kwargs = {"timeout_s": timeout_s}
                                     if model_version:
+                                        kwargs["model_version"] = model_version
+                                    if new_chat:
+                                        kwargs["new_chat"] = new_chat
+                                    
+                                    try:
+                                        answer, url = await adapter.ask(prompt, **kwargs)
+                                    except TypeError:
+                                        # 如果 adapter 不支持某些参数，逐步回退
+                                        kwargs.pop("new_chat", None)
                                         try:
-                                            answer, url = await adapter.ask(prompt, timeout_s=timeout_s, model_version=model_version)
+                                            answer, url = await adapter.ask(prompt, **kwargs)
                                         except TypeError:
-                                            # 如果 adapter 不支持 model_version 参数，回退到只传 timeout_s
-                                            answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
-                                    else:
-                                        answer, url = await adapter.ask(prompt, timeout_s=timeout_s)
+                                            kwargs.pop("model_version", None)
+                                            answer, url = await adapter.ask(prompt, **kwargs)
                                 except TypeError:
                                     answer, url = await adapter.ask(prompt)
                                 ok = True
