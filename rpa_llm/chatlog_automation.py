@@ -14,6 +14,8 @@ from typing import Optional
 
 import yaml
 
+import re
+
 from .chatlog_client import ChatlogClient
 from .chatlog_cli import analyze_chatlog_conversations
 from .driver_client import run_task as driver_run_task
@@ -67,6 +69,63 @@ def format_date_range(start: datetime, end: datetime) -> str:
     if start.date() == end.date():
         return start.strftime("%Y-%m-%d")
     return f"{start.strftime('%Y-%m-%d')}~{end.strftime('%Y-%m-%d')}"
+
+
+def normalize_model_version_for_filename(model_version: str) -> str:
+    """
+    规范化模型版本字符串，用于文件名
+    
+    确保不同格式的模型版本（如 "5.2pro", "5.2-pro", "gpt-5.2-pro"）生成不同的文件名，
+    同时去除特殊字符，确保文件名安全。
+    
+    Args:
+        model_version: 原始模型版本字符串，如 "5.2pro", "5.2instant", "gpt-5.2-pro"
+    
+    Returns:
+        规范化后的模型版本字符串，用于文件名，如 "5.2pro", "5.2instant", "gpt-5.2-pro"
+    
+    Examples:
+        >>> normalize_model_version_for_filename("5.2pro")
+        "5.2pro"
+        >>> normalize_model_version_for_filename("5.2-pro")
+        "5.2-pro"
+        >>> normalize_model_version_for_filename("gpt-5.2-pro")
+        "gpt-5.2-pro"
+        >>> normalize_model_version_for_filename("5.2instant")
+        "5.2instant"
+        >>> normalize_model_version_for_filename("GPT-5")
+        "GPT-5"
+    """
+    if not model_version:
+        return "default"
+    
+    # 去除首尾空白
+    normalized = model_version.strip()
+    
+    # 转换为小写，但保留关键区分信息（如 pro vs instant）
+    # 注意：我们不全部转小写，因为 "5.2pro" 和 "5.2Pro" 应该被视为相同
+    # 但 "5.2pro" 和 "5.2instant" 应该保持不同
+    
+    # 规范化常见的变体格式
+    # "gpt-5.2-pro" -> "gpt-5.2-pro" (保持不变，因为包含 gpt 前缀)
+    # "5.2-pro" -> "5.2-pro" (保持不变)
+    # "5.2pro" -> "5.2pro" (保持不变)
+    # "5.2Pro" -> "5.2pro" (统一转小写，但保留数字和点)
+    # "GPT-5" -> "gpt-5" (统一转小写)
+    
+    # 如果包含大写字母，统一转小写（但保留数字、点、横线）
+    if any(c.isupper() for c in normalized):
+        # 保留数字、点、横线、小写字母
+        normalized = re.sub(r'[A-Z]', lambda m: m.group().lower(), normalized)
+    
+    # 去除文件名不安全的字符（保留字母、数字、点、横线、下划线）
+    normalized = re.sub(r'[^\w.\-]+', '', normalized)
+    
+    # 确保不为空
+    if not normalized:
+        return "default"
+    
+    return normalized
 
 
 async def save_raw_file(
@@ -225,7 +284,9 @@ async def save_summary_file(
     
     date_range_str = format_date_range(start, end)
     week = paths["week"]
-    filename = f"{talker} 第{week}周-{date_range_str}-Sum-{model_version}.md"
+    # 规范化模型版本字符串，确保不同模型版本生成不同的文件名
+    normalized_model_version = normalize_model_version_for_filename(model_version)
+    filename = f"{talker} 第{week}周-{date_range_str}-Sum-{normalized_model_version}.md"
     summary_path = paths["dir"] / filename
     
     # 保存 summary 文件
