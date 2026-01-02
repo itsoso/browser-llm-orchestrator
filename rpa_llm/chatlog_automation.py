@@ -387,7 +387,6 @@ async def run_automation(
     print(f"[{beijing_now_iso()}] [automation] talker={talker}, date_range={format_date_range(start, end)}")
     
     # 检查是否已经有相同的 summary 文件（防止重复执行）
-    from .vault import build_obsidian_paths
     paths = build_obsidian_paths(base_path, talker, start, subdir="10-Summaries")
     date_range_str = format_date_range(start, end)
     week = paths["week"]
