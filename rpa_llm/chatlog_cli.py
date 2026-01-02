@@ -56,7 +56,7 @@ async def analyze_chatlog_conversations(
     prompt_template: str = None,
     vault_path: Path = None,
     driver_url: str = None,
-    task_timeout_s: int = 480,
+    task_timeout_s: int = 1200,
     tags: List[str] = None,
     synthesis_left_site: str = "gemini",
     synthesis_right_site: str = "chatgpt",
@@ -337,7 +337,7 @@ def main():
     parser.add_argument("--prompt-template", default=None, help="分析 prompt 模板文件路径（可选）")
     parser.add_argument("--vault-path", default=None, help="Obsidian vault 路径（默认: ~/work/personal/obsidian/personal）")
     parser.add_argument("--driver-url", default=None, help="driver_server URL（默认: 从环境变量或 brief.yaml 读取）")
-    parser.add_argument("--task-timeout-s", type=int, default=480, help="任务超时时间（秒，默认: 480）")
+    parser.add_argument("--task-timeout-s", type=int, default=1200, help="任务超时时间（秒，默认: 1200，ChatGPT 5.2 Pro 建议 1200 或更长）")
     parser.add_argument("--tags", nargs="+", default=["Chatlog", "Multi-LLM", "Analysis"], help="标签列表")
     parser.add_argument("--synthesis-left-site", default="gemini", help="synthesis 左侧站点（默认: gemini）")
     parser.add_argument("--synthesis-right-site", default="chatgpt", help="synthesis 右侧站点（默认: chatgpt）")

@@ -1835,7 +1835,7 @@ class ChatGPTAdapter(SiteAdapter):
         # 如果所有方法都尝试过了，不报错（因为 Enter 或 Control+Enter 可能已经生效）
         self._log("send: all send methods attempted (Enter/Control+Enter/Button)")
 
-    async def ask(self, prompt: str, timeout_s: int = 480) -> Tuple[str, str]:
+    async def ask(self, prompt: str, timeout_s: int = 1200) -> Tuple[str, str]:
         """
         发送 prompt 并等待回复。
         

@@ -115,7 +115,7 @@ async def run_site_worker(
     headless: bool = False,
     sem: asyncio.Semaphore | None = None,
     driver_url: str | None = None,
-    task_timeout_s: int = 480,
+    task_timeout_s: int = 1200,
 ) -> List[ModelResult]:
     results: List[ModelResult] = []
     driver_url = (driver_url or "").strip() or None
@@ -459,7 +459,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
     driver_url = (str(brief.output.get("driver_url", "")).strip() or None) or (
         (os.environ.get("RPA_DRIVER_URL") or "").strip() or None
     )
-    task_timeout_s = int(brief.output.get("task_timeout_s", 480))
+    task_timeout_s = int(brief.output.get("task_timeout_s", 1200))
 
     vault_paths = make_run_paths(vault_path, root_dir, run_id)
     for p in vault_paths.values():

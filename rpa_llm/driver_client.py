@@ -13,7 +13,7 @@ import urllib.error
 from typing import Any, Dict
 
 
-def run_task(driver_url: str, site_id: str, prompt: str, timeout_s: int = 480) -> Dict[str, Any]:
+def run_task(driver_url: str, site_id: str, prompt: str, timeout_s: int = 1200) -> Dict[str, Any]:
     url = driver_url.rstrip("/") + "/run_task"
     payload = {"site_id": site_id, "prompt": prompt, "timeout_s": timeout_s}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
