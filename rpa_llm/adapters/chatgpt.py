@@ -1126,12 +1126,32 @@ class ChatGPTAdapter(SiteAdapter):
 
         # 优化：提取辅助方法，减少重复代码
         async def check_if_sent(method_name: str) -> bool:
-            """检查是否已经发送成功"""
+            """检查是否已经发送成功（多重检查：user_count、textbox cleared、stop button）"""
             try:
+                # 检查 1: user_count 增加（最可靠）
                 user_count_now = await self._user_count()
                 if user_count_now > user_count_before_send:
                     self._log(f"send: confirmed sent via {method_name} (user_count={user_count_now})")
                     return True
+                
+                # 检查 2: textbox 已清空
+                try:
+                    tb_loc = self.page.locator('div[id="prompt-textarea"]').first
+                    if await tb_loc.count() > 0:
+                        text_now = await asyncio.wait_for(self._tb_get_text(tb_loc), timeout=0.3)
+                        if text_now is not None and text_now.strip() == "":
+                            self._log(f"send: confirmed sent via {method_name} (textbox cleared)")
+                            return True
+                except Exception:
+                    pass
+                
+                # 检查 3: stop button 出现（表示正在生成）
+                try:
+                    if await self._is_generating():
+                        self._log(f"send: confirmed sent via {method_name} (stop button visible)")
+                        return True
+                except Exception:
+                    pass
             except Exception:
                 pass
             return False
@@ -1179,16 +1199,43 @@ class ChatGPTAdapter(SiteAdapter):
 
         # 步骤 3: 最后才找按钮 (最慢，最容易失败)
         # 只有当前面两个都不行时，才去 DOM 里挖按钮
+        # 修复：在点击按钮之前，检查是否已经发送成功（防止重复点击）
+        if await check_if_sent("before button attempts"):
+            return
+        
         for send_sel in self.SEND_BTN:
             if time.time() - send_phase_start >= send_phase_max_s:
                 self._log(
                     f"send: send phase reached {send_phase_max_s:.1f}s, stopping button attempts"
                 )
                 return
+            
+            # 修复：在每次循环开始时，检查是否已经发送成功
+            if await check_if_sent(f"before button {send_sel}"):
+                return
+            
             try:
                 btn = frame.locator(send_sel).first
                 # 修复：is_visible() 不接受 timeout 参数，改为 wait_for(state="visible")
                 if await btn.count() > 0:
+                    # 修复：在点击之前，显式检查按钮是否是"停止生成"按钮
+                    try:
+                        aria_label = await btn.get_attribute("aria-label") or ""
+                        btn_text = await btn.inner_text() or ""
+                        # 检查是否是停止按钮
+                        if "停止" in aria_label or "Stop" in aria_label or "stop" in aria_label.lower():
+                            self._log(f"send: button {send_sel} is a stop button (aria-label={aria_label}), skipping")
+                            continue
+                        if "停止" in btn_text or "Stop" in btn_text or "stop" in btn_text.lower():
+                            self._log(f"send: button {send_sel} has stop text ({btn_text[:30]}), skipping")
+                            continue
+                    except Exception:
+                        pass  # 检查失败不影响继续
+                    
+                    # 修复：在点击之前，再次检查是否已经发送成功
+                    if await check_if_sent(f"just before clicking {send_sel}"):
+                        return
+                    
                     await btn.wait_for(state="visible", timeout=1000)
                     self._log(f"send: clicking send button {send_sel}...")
                     await btn.click(timeout=3000)
