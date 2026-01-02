@@ -375,7 +375,7 @@ class ChatGPTAdapter(SiteAdapter):
                     const style = window.getComputedStyle(el);
                     return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
                 }"""),
-                timeout=0.5  # 快速检查，最多 0.5 秒
+                timeout=0.2  # P1优化：从 0.5 秒减少到 0.2 秒，加快 fast path 检查
             )
             if result:
                 self._log("ensure_ready: fast path via prompt-textarea")
@@ -385,9 +385,10 @@ class ChatGPTAdapter(SiteAdapter):
         
         # 优化：如果快速路径失败，尝试使用 locator（但减少超时）
         # 修复：loc.count() 返回 coroutine，需要 await
+        # P1优化：从 0.3 秒减少到 0.15 秒，加快 fast path 检查
         try:
             loc = self.page.locator('div[id="prompt-textarea"]').first
-            count = await asyncio.wait_for(loc.count(), timeout=0.3)
+            count = await asyncio.wait_for(loc.count(), timeout=0.15)  # 从 0.3 秒减少到 0.15 秒
             if count > 0:
                 # 不等待 is_visible()，直接返回（如果元素存在，通常就是可见的）
                 self._log("ensure_ready: fast path via prompt-textarea (count check)")
@@ -702,8 +703,8 @@ class ChatGPTAdapter(SiteAdapter):
         # 这样可以更快地检测到发送成功，避免长时间等待
         combined_user_sel = ", ".join(self.USER_MSG)
         
-        # 高频轮询检查（每 0.005 秒检查一次，最多 1.0 秒）
-        max_attempts = 200  # 1.0 秒 / 0.005 秒 = 200 次（增加轮询次数）
+        # 高频轮询检查（每 0.005 秒检查一次，最多 0.5 秒）- P0优化：从 1.0 秒减少到 0.5 秒
+        max_attempts = 100  # 0.5 秒 / 0.005 秒 = 100 次（从 200 次减少到 100 次，加快检测速度）
         for attempt in range(max_attempts):
             try:
                 # 并行检查多个信号：user_count, textbox cleared, stop button
@@ -842,8 +843,8 @@ class ChatGPTAdapter(SiteAdapter):
                 # 尝试关闭弹窗/遮罩
                 await self._dismiss_overlays()
                 self._log(f"send: textbox not found, retrying... ({retry+1}/{max_retries})")
-                # 优化：减少重试间隔，加快重试速度
-                await asyncio.sleep(0.3)  # 从 0.5s 减少到 0.3s
+                # P1优化：减少重试间隔，从 0.3s 减少到 0.1s，加快重试速度
+                await asyncio.sleep(0.1)  # 从 0.3s 减少到 0.1s
             else:
                 # 最后一次尝试失败，保存截图并触发 manual checkpoint
                 await self.save_artifacts("send_no_textbox")
@@ -882,8 +883,8 @@ class ChatGPTAdapter(SiteAdapter):
             try:
                 if attempt > 0:
                     self._log(f"send: attempt {attempt+1}, re-finding textbox and clearing...")
-                    # 重试时重新查找元素（元素可能已变化）
-                    await asyncio.sleep(1.5)  # 等待页面稳定
+                    # P1优化：重试时重新查找元素（元素可能已变化），减少等待时间
+                    await asyncio.sleep(0.5)  # 从 1.5 秒减少到 0.5 秒，加快重试速度
                     found_retry = await self._find_textbox_any_frame()
                     if found_retry:
                         tb, frame, how = found_retry
@@ -1944,10 +1945,11 @@ class ChatGPTAdapter(SiteAdapter):
                     # 修复：wait_for_function 的正确调用方式
                     # Playwright 的 wait_for_function 签名：wait_for_function(expression, arg=None, timeout=None)
                     # 注意：arg 和 timeout 都必须作为关键字参数传递
-                    # 优化：减少超时时间，从 assistant_wait_timeout 减少到 min(assistant_wait_timeout, 5) 秒
+                    # 优化：减少超时时间，从 assistant_wait_timeout 减少到 min(assistant_wait_timeout, 3) 秒
                     # 修复：assistant wait 耗时 102 秒的主要原因是 wait_for_function 超时时间太长（90秒）
                     # 应该使用更短的超时时间，如果超时就立即检查文本变化，而不是等待 90 秒
-                    wait_timeout_ms = int(min(assistant_wait_timeout, 5) * 1000)  # 最多 5 秒（从 10 秒减少到 5 秒）
+                    # P0优化：从 5 秒减少到 3 秒，加快检测速度
+                    wait_timeout_ms = int(min(assistant_wait_timeout, 3) * 1000)  # 最多 3 秒（从 5 秒减少到 3 秒）
                     await self.page.wait_for_function(
                         """(args) => {
                             const n0 = args.n0;
@@ -2002,12 +2004,12 @@ class ChatGPTAdapter(SiteAdapter):
                 # 如果仍然没有检测到新消息，触发 manual checkpoint（但减少等待时间）
                 if n_assist1 <= n_assist0:
                     await self.save_artifacts("no_assistant_reply")
-                    # 优化：减少 manual checkpoint 的等待时间，从 60 秒减少到 30 秒
-                    # 这样可以更快地检测到新消息，而不是等待 60 秒
+                    # 优化：减少 manual checkpoint 的等待时间，从 30 秒减少到 15 秒
+                    # 这样可以更快地检测到新消息，而不是等待 30 秒
                     await self.manual_checkpoint(
                         "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
                         ready_check=self._ready_check_textbox,
-                        max_wait_s=min(30, timeout_s - elapsed - 5),  # 从 60 秒减少到 30 秒
+                        max_wait_s=min(15, timeout_s - elapsed - 5),  # 从 30 秒减少到 15 秒（P0优化）
                     )
                     # manual_checkpoint 后再次检查
                     try:

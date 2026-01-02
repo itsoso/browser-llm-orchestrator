@@ -93,7 +93,8 @@ class GeminiAdapter(SiteAdapter):
 
     # ===== Tunables =====
     # Keep send attempts short; long waits should happen in response wait, not send.
-    SEND_HARD_CAP_S = float(os.environ.get("GEMINI_SEND_HARD_CAP_S", "8.0"))
+    # P1优化：减少发送硬限制时间，从 8.0 秒减少到 5.0 秒，加快发送速度
+    SEND_HARD_CAP_S = float(os.environ.get("GEMINI_SEND_HARD_CAP_S", "5.0"))  # 从 8.0 秒减少到 5.0 秒
     SEND_CLICK_TIMEOUT_MS = int(os.environ.get("GEMINI_SEND_CLICK_TIMEOUT_MS", "1200"))
     SEND_ENABLE_WAIT_S = float(os.environ.get("GEMINI_SEND_ENABLE_WAIT_S", "1.0"))
 
@@ -783,7 +784,8 @@ class GeminiAdapter(SiteAdapter):
 
     # ===== Send + Wait =====
 
-    async def _sent_accepted(self, tb: Locator, before_len: int, assist_cnt0: int, assist_hash0: str, timeout_s: float = 1.3) -> Optional[str]:
+    # P1优化：减少默认超时时间，从 1.3 秒减少到 1.0 秒，加快发送确认速度
+    async def _sent_accepted(self, tb: Locator, before_len: int, assist_cnt0: int, assist_hash0: str, timeout_s: float = 1.0) -> Optional[str]:  # 从 1.3 秒减少到 1.0 秒
         """
         Return a reason string if send is accepted; else None.
         优化：实现"信号竞争"机制，并行检查多个信号，谁先到就算谁。
@@ -795,7 +797,8 @@ class GeminiAdapter(SiteAdapter):
         """
         # 优化：使用并行检查，实现"信号竞争"机制
         t0 = time.time()
-        check_interval = 0.1  # 减少检查间隔，加快响应速度
+        # P1优化：减少检查间隔，从 0.1 秒减少到 0.05 秒，加快响应速度
+        check_interval = 0.05  # 从 0.1 秒减少到 0.05 秒
         
         while time.time() - t0 < timeout_s:
             # 并行检查所有信号，谁先成功就返回
@@ -822,9 +825,10 @@ class GeminiAdapter(SiteAdapter):
                 return None
             
             # 3. 较慢：assistant_count（只在检查次数较少时检查，避免频繁调用）
+            # P1优化：减少超时时间，从 0.6 秒减少到 0.4 秒，加快检查速度
             async def check_assistant_count():
                 try:
-                    c = await asyncio.wait_for(self._assistant_count(), timeout=0.6)
+                    c = await asyncio.wait_for(self._assistant_count(), timeout=0.4)  # 从 0.6 秒减少到 0.4 秒
                     if c > assist_cnt0:
                         return f"assistant_count_inc({assist_cnt0}->{c})"
                 except (asyncio.TimeoutError, Exception):
@@ -838,9 +842,10 @@ class GeminiAdapter(SiteAdapter):
                 asyncio.create_task(check_assistant_count()),
             ]
             try:
+                # P1优化：减少每次检查的超时时间，从 0.6 秒减少到 0.4 秒，加快检查速度
                 results = await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=min(0.6, timeout_s - (time.time() - t0))  # 每次检查最多 0.6 秒
+                    timeout=min(0.4, timeout_s - (time.time() - t0))  # 从 0.6 秒减少到 0.4 秒
                 )
             except (asyncio.TimeoutError, Exception):
                 for t in tasks:
