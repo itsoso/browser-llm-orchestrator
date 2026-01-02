@@ -676,8 +676,8 @@ class ChatGPTAdapter(SiteAdapter):
         # 这样可以更快地检测到发送成功，避免长时间等待
         combined_user_sel = ", ".join(self.USER_MSG)
         
-        # 高频轮询检查（每 0.02 秒检查一次，最多 1.2 秒）
-        max_attempts = 60  # 1.2 秒 / 0.02 秒 = 60 次
+        # 高频轮询检查（每 0.01 秒检查一次，最多 0.8 秒）
+        max_attempts = 80  # 0.8 秒 / 0.01 秒 = 80 次
         for attempt in range(max_attempts):
             try:
                 # 并行检查多个信号：user_count, textbox cleared, stop button
@@ -709,7 +709,7 @@ class ChatGPTAdapter(SiteAdapter):
                         }""",
                         {"userSel": combined_user_sel, "user0": user0}
                     ),
-                    timeout=0.05  # 每次检查最多 0.05 秒（从 0.08 秒减少）
+                    timeout=0.02  # 每次检查最多 0.02 秒（从 0.05 秒减少）
                 )
                 
                 if isinstance(result, dict) and result.get("signal") != "none":
@@ -725,12 +725,12 @@ class ChatGPTAdapter(SiteAdapter):
             except (asyncio.TimeoutError, Exception):
                 pass
             
-            # 每 0.02 秒检查一次（从 0.03 秒减少到 0.02 秒）
-            await asyncio.sleep(0.02)
+            # 每 0.01 秒检查一次（从 0.02 秒减少到 0.01 秒，更激进）
+            await asyncio.sleep(0.01)
         
         # 如果高频轮询失败，尝试并行确认（作为兜底，但减少超时时间）
         self._log("send: high-frequency polling failed, trying parallel confirmation...")
-        if await self._fast_send_confirm(user0, timeout_ms=300):  # 从 400ms 减少到 300ms
+        if await self._fast_send_confirm(user0, timeout_ms=200):  # 从 300ms 减少到 200ms
             self._log("send: fast path confirmed (parallel confirmation)")
             return
         
@@ -738,8 +738,8 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 再次高频轮询（最多 0.8 秒，使用相同的多信号检查）
-        for attempt in range(40):  # 0.8 秒 / 0.02 秒 = 40 次
+        # 再次高频轮询（最多 0.5 秒，使用相同的多信号检查）
+        for attempt in range(50):  # 0.5 秒 / 0.01 秒 = 50 次
             try:
                 result = await asyncio.wait_for(
                     self.page.evaluate(
@@ -768,7 +768,7 @@ class ChatGPTAdapter(SiteAdapter):
                         }""",
                         {"userSel": combined_user_sel, "user0": user0}
                     ),
-                    timeout=0.05  # 从 0.08 秒减少到 0.05 秒
+                    timeout=0.02  # 从 0.05 秒减少到 0.02 秒
                 )
                 
                 if isinstance(result, dict) and result.get("signal") != "none":
@@ -784,7 +784,7 @@ class ChatGPTAdapter(SiteAdapter):
             except (asyncio.TimeoutError, Exception):
                 pass
             
-            await asyncio.sleep(0.02)  # 从 0.03 秒减少到 0.02 秒
+            await asyncio.sleep(0.01)  # 从 0.02 秒减少到 0.01 秒
         
         # 如果还是失败，抛出异常（让上层处理）
         raise RuntimeError("send not accepted after 2 Control+Enter attempts")
@@ -1544,10 +1544,10 @@ class ChatGPTAdapter(SiteAdapter):
             # 先尝试高频轮询（更快），如果失败再使用 wait_for_function（更可靠）
             combined_sel = ", ".join(self.ASSISTANT_MSG)
             
-            # 优化：先尝试高频轮询（最多 2 秒），这样可以更快检测到新消息
+            # 优化：先尝试高频轮询（最多 1.5 秒），这样可以更快检测到新消息
             n_assist1 = n_assist0
             polling_success = False
-            for attempt in range(50):  # 2 秒 / 0.04 秒 = 50 次
+            for attempt in range(100):  # 1.5 秒 / 0.015 秒 = 100 次
                 try:
                     current_count = await asyncio.wait_for(
                         self.page.evaluate(
@@ -1556,7 +1556,7 @@ class ChatGPTAdapter(SiteAdapter):
                             }""",
                             combined_sel
                         ),
-                        timeout=0.03  # 每次检查最多 0.03 秒（从 0.05 秒减少）
+                        timeout=0.015  # 每次检查最多 0.015 秒（从 0.03 秒减少）
                     )
                     if isinstance(current_count, int) and current_count > n_assist0:
                         n_assist1 = current_count
@@ -1566,14 +1566,17 @@ class ChatGPTAdapter(SiteAdapter):
                 except (asyncio.TimeoutError, Exception):
                     pass
                 
-                await asyncio.sleep(0.04)  # 从 0.05 秒减少到 0.04 秒
+                await asyncio.sleep(0.015)  # 从 0.04 秒减少到 0.015 秒，更激进
             
             # 如果高频轮询失败，使用 wait_for_function（事件驱动，更可靠）
             if not polling_success:
                 try:
+                    # 优化：减少 wait_for_function 的超时时间，加快检测
                     # 修复：wait_for_function 的正确调用方式
                     # Playwright 的 wait_for_function 签名：wait_for_function(expression, arg=None, timeout=None)
                     # 注意：arg 和 timeout 都必须作为关键字参数传递
+                    # 优化：减少超时时间，从 assistant_wait_timeout 减少到 min(assistant_wait_timeout, 15) 秒
+                    wait_timeout_ms = int(min(assistant_wait_timeout, 15) * 1000)  # 最多 15 秒
                     await self.page.wait_for_function(
                         """(args) => {
                             const n0 = args.n0;
@@ -1582,22 +1585,22 @@ class ChatGPTAdapter(SiteAdapter):
                             return n > n0;
                         }""",
                         arg={"n0": n_assist0, "sel": combined_sel},
-                        timeout=int(assistant_wait_timeout * 1000)  # wait_for_function 使用毫秒，确保是整数
+                        timeout=wait_timeout_ms  # wait_for_function 使用毫秒，确保是整数
                     )
                     # 等待成功后，获取实际的 assistant_count
                     n_assist1 = await self._assistant_count()
                     self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via wait_for_function)")
                 except Exception as e:
                     # wait_for_function 超时或失败，fallback 到快速检查
-                    self._log(f"ask: wait_for_function timeout/error ({e}), falling back to quick check...")
+                    # 优化：减少 fallback 检查的超时时间
                     try:
-                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
+                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.8)  # 从 1.0 秒减少到 0.8 秒
                         if n_assist1 > n_assist0:
                             self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
                         else:
                             # 如果计数没有增加，尝试检查文本变化
                             try:
-                                text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.8)
+                                text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.6)  # 从 0.8 秒减少到 0.6 秒
                                 if text_quick and text_quick != last_assist_text_before:
                                     self._log("ask: text changed, assuming new message")
                                     n_assist1 = n_assist0 + 1  # 合成值
