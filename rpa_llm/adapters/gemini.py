@@ -578,24 +578,62 @@ class GeminiAdapter(SiteAdapter):
             )
 
         # Fast path
-        await self._dismiss_popups()
-        tb = await self._fast_find_textbox()
+        try:
+            await self._dismiss_popups()
+        except Exception as e:
+            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+            if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                raise RuntimeError(f"Browser/page closed during dismiss_popups: {e}") from e
+            pass  # 其他异常不影响继续
+        
+        try:
+            tb = await self._fast_find_textbox()
+        except Exception as e:
+            # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+            if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                raise RuntimeError(f"Browser/page closed during _fast_find_textbox: {e}") from e
+            tb = None
+        
         if tb:
             # 优化：增加 actionability 检查，确保元素不仅可见而且可操作
             # 修复：页面可能还在进行 Hydration（水合），DOM 存在但事件监听没挂载
             try:
                 # 确保元素不仅可见，而且是可编辑状态
-                await tb.wait_for(state="visible", timeout=2000)
+                try:
+                    await asyncio.wait_for(
+                        tb.wait_for(state="visible", timeout=2000),
+                        timeout=2.5  # 额外 0.5 秒缓冲
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                    if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                        raise RuntimeError(f"Browser/page closed during wait_for visible: {e}") from e
+                    raise  # 其他异常继续抛出
+                
                 # 检查 contenteditable 属性是否真的为 true
-                is_editable = await tb.evaluate("""(el) => {
-                    return el.getAttribute('contenteditable') === 'true' || el.contentEditable === 'true';
-                }""")
+                try:
+                    is_editable = await asyncio.wait_for(
+                        tb.evaluate("""(el) => {
+                            return el.getAttribute('contenteditable') === 'true' || el.contentEditable === 'true';
+                        }"""),
+                        timeout=1.0
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                    if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                        raise RuntimeError(f"Browser/page closed during evaluate: {e}") from e
+                    # 检查失败，继续正常路径
+                    is_editable = False
+                
                 if is_editable:
                     self._log("ensure_ready: textbox found quickly (fast path) and is editable")
                     return
                 else:
                     self._log("ensure_ready: textbox found but not editable yet, continuing...")
-            except Exception:
+            except Exception as e:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during fast path check: {e}") from e
                 # 检查失败，继续正常路径
                 pass
 
@@ -606,12 +644,31 @@ class GeminiAdapter(SiteAdapter):
             attempts += 1
             # 优化：增加弹窗清理频率，每 3 次尝试清理一次（而不是 4 次）
             if attempts % 3 == 0:
-                await self._dismiss_popups()
+                try:
+                    await self._dismiss_popups()
+                except Exception as e:
+                    # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                    if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                        raise RuntimeError(f"Browser/page closed during dismiss_popups: {e}") from e
+                    pass  # 其他异常不影响继续
 
             # 优化：先尝试快速路径，如果失败再尝试完整路径
-            tb = await self._fast_find_textbox()
+            try:
+                tb = await self._fast_find_textbox()
+            except Exception as e:
+                # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during _fast_find_textbox: {e}") from e
+                tb = None
+            
             if not tb:
-                tb = await self._find_textbox()
+                try:
+                    tb = await self._find_textbox()
+                except Exception as e:
+                    # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                    if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                        raise RuntimeError(f"Browser/page closed during _find_textbox: {e}") from e
+                    tb = None
             
             if tb:
                 self._log(f"ensure_ready: textbox found (took {time.time()-t0:.2f}s)")
@@ -622,9 +679,12 @@ class GeminiAdapter(SiteAdapter):
                 # 检查页面状态，帮助诊断
                 try:
                     url = self.page.url
-                    title = await self.page.title()
+                    title = await asyncio.wait_for(self.page.title(), timeout=1.0)
                     self._log(f"ensure_ready: still locating textbox... (attempt {attempts}, url={url[:60]}, title={title[:40]})")
-                except Exception:
+                except Exception as e:
+                    # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception
+                    if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                        raise RuntimeError(f"Browser/page closed during status check: {e}") from e
                     self._log(f"ensure_ready: still locating textbox... (attempt {attempts})")
 
             # 优化：增加循环间隔，避免频繁调用（_find_textbox 可能耗时较长）
