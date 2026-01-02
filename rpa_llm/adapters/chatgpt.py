@@ -2222,13 +2222,13 @@ class ChatGPTAdapter(SiteAdapter):
                     pass  # 其他异常继续轮询
                 
                 await asyncio.sleep(0.01)  # 从 0.015 秒减少到 0.01 秒，更激进
-            
-            # 如果轮询过程中检测到 thinking，设置标志
-            if thinking_detected_during_polling:
-                self._log("ask: thinking mode detected during polling, will prioritize thinking detection in fallback")
-            
-            # 如果高频轮询失败，使用 wait_for_function（事件驱动，更可靠）
-            if not polling_success:
+        
+        # 如果轮询过程中检测到 thinking，设置标志
+        if thinking_detected_during_polling:
+            self._log("ask: thinking mode detected during polling, will prioritize thinking detection in fallback")
+        
+        # 如果高频轮询失败，使用 wait_for_function（事件驱动，更可靠）
+        if not polling_success:
                 try:
                     # 优化：减少 wait_for_function 的超时时间，加快检测
                     # 修复：wait_for_function 的正确调用方式
