@@ -1,0 +1,415 @@
+# -*- coding: utf-8 -*-
+"""
+Chatlog 自动化工作流
+实现从 chatlog 获取聊天记录 -> 保存 raw 文件 -> LLM 分析 -> 保存 summary 文件的完整流程
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+import yaml
+
+from .chatlog_client import ChatlogClient
+from .chatlog_cli import analyze_chatlog_conversations
+from .driver_client import run_task as driver_run_task
+from .utils import beijing_now_iso, ensure_dir
+from .vault import write_markdown
+
+
+def get_week_number(date: datetime) -> int:
+    """获取日期所在周数（ISO 8601 标准，周一开始）"""
+    # ISO 8601: 周一是第一天，第一周是包含1月4日的那一周
+    iso_year, iso_week, _ = date.isocalendar()
+    return iso_week
+
+
+def build_obsidian_paths(
+    base_path: Path,
+    talker: str,
+    date: datetime,
+    subdir: str = "00-raws",
+) -> dict:
+    """
+    构建 Obsidian 目录结构
+    
+    Args:
+        base_path: 基础路径，如 /Users/liqiuhua/work/personal/obsidian/personal/10_Sources/WeChat
+        talker: 聊天对象，如 "川群-2025"
+        date: 日期
+        subdir: 子目录，如 "00-raws" 或 "10-Summaries"
+    
+    Returns:
+        包含目录路径和文件路径的字典
+    """
+    year = date.year
+    month = date.month
+    week = get_week_number(date)
+    
+    # 构建目录路径：{subdir}/{talker}/{year}/{month}/第{week}周
+    dir_path = base_path / subdir / talker / str(year) / f"{month:02d}" / f"第{week}周"
+    ensure_dir(dir_path)
+    
+    return {
+        "dir": dir_path,
+        "year": year,
+        "month": month,
+        "week": week,
+    }
+
+
+def format_date_range(start: datetime, end: datetime) -> str:
+    """格式化日期范围为字符串"""
+    if start.date() == end.date():
+        return start.strftime("%Y-%m-%d")
+    return f"{start.strftime('%Y-%m-%d')}~{end.strftime('%Y-%m-%d')}"
+
+
+async def save_raw_file(
+    messages: list,
+    base_path: Path,
+    talker: str,
+    start: datetime,
+    end: datetime,
+    client: ChatlogClient,
+) -> Path:
+    """
+    保存 raw 文件
+    
+    Returns:
+        raw 文件路径
+    """
+    paths = build_obsidian_paths(base_path, talker, start, subdir="00-raws")
+    
+    date_range_str = format_date_range(start, end)
+    filename = f"{talker} {date_range_str}-raw.md"
+    raw_path = paths["dir"] / filename
+    
+    # 格式化聊天记录
+    formatted_content = client.format_messages_for_prompt(messages, talker=talker)
+    
+    # 保存 raw 文件
+    write_markdown(
+        raw_path,
+        {
+            "type": ["wechat_raw", "chatlog"],
+            "created": beijing_now_iso(),
+            "talker": talker,
+            "date_range": date_range_str,
+            "message_count": len(messages),
+        },
+        formatted_content
+    )
+    
+    print(f"[{beijing_now_iso()}] [automation] ✓ Raw 文件已保存: {raw_path}")
+    return raw_path
+
+
+async def load_template_and_generate_prompt(
+    template_path: Path,
+    raw_content: str,
+    talker: str,
+    date_range: str,
+    week: int,
+) -> str:
+    """
+    从 template 文件加载并生成 prompt
+    
+    Args:
+        template_path: template 文件路径
+        raw_content: raw 文件内容
+        talker: 聊天对象
+        date_range: 日期范围字符串
+        week: 周数
+    
+    Returns:
+        生成的 prompt
+    """
+    if not template_path.exists():
+        # 使用默认模板
+        default_template = """你是资深研究员/分析师。请分析以下聊天记录，输出"结论清晰、证据可追溯、便于 Obsidian 阅读"的研究笔记。
+
+聊天记录：
+{conversation_content}
+
+请按以下结构输出：
+## 1. 关键结论
+## 2. 输出洞察
+## 3. 行动建议（如有）
+## 4. 相关话题（如有）
+"""
+        return default_template.format(conversation_content=raw_content)
+    
+    template = template_path.read_text(encoding="utf-8")
+    
+    # 替换模板中的占位符
+    prompt = template.format(
+        conversation_content=raw_content,
+        talker=talker,
+        date_range=date_range,
+        week=week,
+    )
+    
+    return prompt
+
+
+async def save_summary_file(
+    summary_content: str,
+    base_path: Path,
+    talker: str,
+    start: datetime,
+    end: datetime,
+    model_version: str = "5.2pro",
+) -> Path:
+    """
+    保存 summary 文件
+    
+    Args:
+        summary_content: LLM 生成的摘要内容
+        base_path: 基础路径
+        talker: 聊天对象
+        start: 开始日期
+        end: 结束日期
+        model_version: 模型版本，如 "5.2pro"
+    
+    Returns:
+        summary 文件路径
+    """
+    paths = build_obsidian_paths(base_path, talker, start, subdir="10-Summaries")
+    
+    date_range_str = format_date_range(start, end)
+    week = paths["week"]
+    filename = f"{talker} 第{week}周-{date_range_str}-Sum-{model_version}.md"
+    summary_path = paths["dir"] / filename
+    
+    # 保存 summary 文件
+    write_markdown(
+        summary_path,
+        {
+            "type": ["wechat_summary", "chatlog_analysis"],
+            "created": beijing_now_iso(),
+            "talker": talker,
+            "date_range": date_range_str,
+            "week": week,
+            "model_version": model_version,
+        },
+        summary_content
+    )
+    
+    print(f"[{beijing_now_iso()}] [automation] ✓ Summary 文件已保存: {summary_path}")
+    return summary_path
+
+
+async def run_automation(
+    chatlog_url: str,
+    talker: str,
+    start: datetime,
+    end: datetime,
+    base_path: Path,
+    template_path: Optional[Path] = None,
+    driver_url: Optional[str] = None,
+    arbitrator_site: str = "gemini",
+    model_version: str = "5.2pro",
+    task_timeout_s: int = 600,
+):
+    """
+    运行完整的自动化流程
+    
+    1. 从 chatlog 获取聊天记录
+    2. 保存 raw 文件
+    3. 从 template 生成 prompt
+    4. 调用 LLM 分析
+    5. 保存 summary 文件
+    """
+    print(f"[{beijing_now_iso()}] [automation] 开始自动化流程")
+    print(f"[{beijing_now_iso()}] [automation] talker={talker}, date_range={format_date_range(start, end)}")
+    
+    # 步骤 1: 获取聊天记录
+    client = ChatlogClient(chatlog_url)
+    try:
+        time_range = format_date_range(start, end)
+        messages = await client.get_conversations(
+            talker=talker,
+            time_range=time_range,
+            start=start,
+            end=end,
+            limit=1000,  # 增加限制以获取更多消息
+        )
+        
+        if not messages:
+            print(f"[{beijing_now_iso()}] [automation] ✗ 未获取到任何消息，退出")
+            return
+        
+        print(f"[{beijing_now_iso()}] [automation] ✓ 获取到 {len(messages)} 条消息")
+        
+        # 步骤 2: 保存 raw 文件
+        raw_path = await save_raw_file(
+            messages, base_path, talker, start, end, client
+        )
+        
+        # 读取 raw 文件内容（用于生成 prompt）
+        raw_content = raw_path.read_text(encoding="utf-8")
+        
+        # 步骤 3: 从 template 生成 prompt
+        week = get_week_number(start)
+        prompt = await load_template_and_generate_prompt(
+            template_path or Path(""),
+            raw_content,
+            talker,
+            time_range,
+            week,
+        )
+        
+        print(f"[{beijing_now_iso()}] [automation] ✓ Prompt 生成完成")
+        
+        # 步骤 4: 调用 LLM 分析
+        if not driver_url:
+            print(f"[{beijing_now_iso()}] [automation] ✗ 未提供 driver_url，跳过 LLM 分析")
+            return
+        
+        print(f"[{beijing_now_iso()}] [automation] 发送到 {arbitrator_site} 进行分析...")
+        
+        payload = await asyncio.to_thread(
+            driver_run_task,
+            driver_url,
+            arbitrator_site,
+            prompt,
+            task_timeout_s,
+        )
+        
+        ok = bool(payload.get("ok"))
+        answer = payload.get("answer") or ""
+        url = payload.get("url") or ""
+        err = payload.get("error")
+        
+        if not ok:
+            raise RuntimeError(f"LLM 分析失败 (site={arbitrator_site}): {err}")
+        
+        print(f"[{beijing_now_iso()}] [automation] ✓ LLM 分析完成")
+        
+        # 步骤 5: 保存 summary 文件
+        summary_path = await save_summary_file(
+            answer, base_path, talker, start, end, model_version
+        )
+        
+        print(f"[{beijing_now_iso()}] [automation] ✓ 自动化流程完成")
+        print(f"[{beijing_now_iso()}] [automation] Raw 文件: {raw_path}")
+        print(f"[{beijing_now_iso()}] [automation] Summary 文件: {summary_path}")
+        
+    finally:
+        await client.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Chatlog 自动化工作流")
+    parser.add_argument("--chatlog-url", required=True, help="chatlog 服务地址，如 http://127.0.0.1:5030")
+    parser.add_argument("--talker", required=True, help="聊天对象标识（必填）")
+    parser.add_argument("--start", required=True, help="开始日期，格式为 YYYY-MM-DD")
+    parser.add_argument("--end", required=True, help="结束日期，格式为 YYYY-MM-DD")
+    parser.add_argument("--base-path", default=None, help="Obsidian 基础路径（默认: ~/work/personal/obsidian/personal/10_Sources/WeChat）")
+    parser.add_argument("--template", default=None, help="Prompt 模板文件路径（可选）")
+    parser.add_argument("--driver-url", default=None, help="driver_server URL（默认: 从环境变量或 brief.yaml 读取）")
+    parser.add_argument("--arbitrator-site", default="gemini", help="LLM 分析站点（默认: gemini）")
+    parser.add_argument("--model-version", default="5.2pro", help="模型版本（默认: 5.2pro）")
+    parser.add_argument("--task-timeout-s", type=int, default=600, help="任务超时时间（秒，默认: 600）")
+    parser.add_argument("--log-file", help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
+    
+    args = parser.parse_args()
+    
+    # 设置日志文件（类似 chatlog_cli）
+    if args.log_file:
+        log_file = Path(args.log_file).expanduser().resolve()
+    else:
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = logs_dir / f"chatlog_automation_{timestamp}.log"
+    
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_file, "a", encoding="utf-8")
+    
+    class Tee:
+        def __init__(self, *files):
+            self.files = files
+        
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()
+        
+        def flush(self):
+            for f in self.files:
+                f.flush()
+    
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    
+    tee_stdout = Tee(sys.stdout, log_fp)
+    tee_stderr = Tee(sys.stderr, log_fp)
+    
+    sys.stdout = tee_stdout
+    sys.stderr = tee_stderr
+    
+    print(f"[automation] 日志文件: {log_file}")
+    print(f"[automation] 日志文件路径: {log_file.absolute()}")
+    
+    try:
+        # 解析日期
+        start = datetime.strptime(args.start, "%Y-%m-%d")
+        end = datetime.strptime(args.end, "%Y-%m-%d")
+        
+        # 设置基础路径
+        if args.base_path:
+            base_path = Path(args.base_path).expanduser().resolve()
+        else:
+            base_path = Path("~/work/personal/obsidian/personal/10_Sources/WeChat").expanduser().resolve()
+        
+        # 设置 template 路径
+        template_path = None
+        if args.template:
+            template_path = Path(args.template).expanduser().resolve()
+        
+        # 获取 driver_url
+        driver_url = args.driver_url or None
+        if not driver_url:
+            import os
+            driver_url = os.environ.get("RPA_DRIVER_URL", "").strip() or None
+        
+        # 如果还没有，尝试从 brief.yaml 读取
+        if not driver_url:
+            try:
+                brief_path = Path("brief.yaml")
+                if brief_path.exists():
+                    brief_data = yaml.safe_load(brief_path.read_text(encoding="utf-8"))
+                    driver_url = brief_data.get("output", {}).get("driver_url", "").strip() or None
+                    if driver_url:
+                        print(f"[{beijing_now_iso()}] [automation] 从 brief.yaml 读取 driver_url: {driver_url}")
+            except Exception:
+                pass
+        
+        asyncio.run(run_automation(
+            chatlog_url=args.chatlog_url,
+            talker=args.talker,
+            start=start,
+            end=end,
+            base_path=base_path,
+            template_path=template_path,
+            driver_url=driver_url,
+            arbitrator_site=args.arbitrator_site,
+            model_version=args.model_version,
+            task_timeout_s=args.task_timeout_s,
+        ))
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        log_fp.close()
+        print(f"\n[automation] 日志已保存到: {log_file.absolute()}", file=original_stdout)
+
+
+if __name__ == "__main__":
+    main()
+
