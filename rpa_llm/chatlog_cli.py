@@ -259,8 +259,53 @@ def main():
     parser.add_argument("--driver-url", default=None, help="driver_server URL（默认: 从环境变量或 brief.yaml 读取）")
     parser.add_argument("--task-timeout-s", type=int, default=480, help="任务超时时间（秒，默认: 480）")
     parser.add_argument("--tags", nargs="+", default=["Chatlog", "Multi-LLM", "Analysis"], help="标签列表")
+    parser.add_argument("--log-file", help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
     
     args = parser.parse_args()
+    
+    # 设置日志文件
+    if args.log_file:
+        log_file = Path(args.log_file).expanduser().resolve()
+    else:
+        # 自动生成日志文件路径：logs/chatlog_YYYYMMDD_HHMMSS.log
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = logs_dir / f"chatlog_{timestamp}.log"
+    
+    # 打开日志文件（追加模式）
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_file, "a", encoding="utf-8")
+    
+    # 创建 Tee 类，同时输出到控制台和文件
+    class Tee:
+        def __init__(self, *files):
+            self.files = files
+        
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()
+        
+        def flush(self):
+            for f in self.files:
+                f.flush()
+    
+    # 保存原始的 stdout 和 stderr
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    
+    # 创建 Tee 对象，同时输出到控制台和文件
+    tee_stdout = Tee(sys.stdout, log_fp)
+    tee_stderr = Tee(sys.stderr, log_fp)
+    
+    # 重定向 stdout 和 stderr
+    sys.stdout = tee_stdout
+    sys.stderr = tee_stderr
+    
+    # 输出日志文件路径
+    print(f"[chatlog] 日志文件: {log_file}")
+    print(f"[chatlog] 日志文件路径: {log_file.absolute()}")
     
     # 读取 prompt 模板
     prompt_template = None
@@ -300,23 +345,32 @@ def main():
     if args.end:
         end = datetime.strptime(args.end, "%Y-%m-%d")
     
-    asyncio.run(analyze_chatlog_conversations(
-        chatlog_url=args.chatlog_url,
-        chatlog_api_key=args.chatlog_api_key,
-        talker=args.talker,
-        time_range=args.time_range,
-        start=start,
-        end=end,
-        sender=args.sender,
-        keyword=args.keyword,
-        limit=args.limit,
-        sites=args.sites,
-        prompt_template=prompt_template,
-        vault_path=vault_path,
-        driver_url=driver_url,
-        task_timeout_s=args.task_timeout_s,
-        tags=args.tags,
-    ))
+    try:
+        asyncio.run(analyze_chatlog_conversations(
+            chatlog_url=args.chatlog_url,
+            chatlog_api_key=args.chatlog_api_key,
+            talker=args.talker,
+            time_range=args.time_range,
+            start=start,
+            end=end,
+            sender=args.sender,
+            keyword=args.keyword,
+            limit=args.limit,
+            sites=args.sites,
+            prompt_template=prompt_template,
+            vault_path=vault_path,
+            driver_url=driver_url,
+            task_timeout_s=args.task_timeout_s,
+            tags=args.tags,
+        ))
+    finally:
+        # 恢复原始的 stdout 和 stderr
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        # 关闭日志文件
+        log_fp.close()
+        # 输出日志文件路径到控制台（恢复后）
+        print(f"\n[chatlog] 日志已保存到: {log_file.absolute()}", file=original_stdout)
 
 
 if __name__ == "__main__":
