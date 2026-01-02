@@ -24,10 +24,41 @@ from .vault import write_markdown
 
 
 def get_week_number(date: datetime) -> int:
-    """获取日期所在周数（ISO 8601 标准，周一开始）"""
-    # ISO 8601: 周一是第一天，第一周是包含1月4日的那一周
-    iso_year, iso_week, _ = date.isocalendar()
-    return iso_week
+    """
+    获取日期在当月是第几周（周一开始）
+    
+    计算逻辑：
+    1. 找到该月第一天
+    2. 计算该日期是当月的第几天
+    3. 根据该月第一天是星期几，计算该日期是当月的第几周
+    
+    Args:
+        date: 日期对象
+    
+    Returns:
+        该日期在当月是第几周（1-6）
+    
+    Examples:
+        >>> get_week_number(datetime(2025, 12, 1))  # 12月1日（周一）
+        1
+        >>> get_week_number(datetime(2025, 12, 30))  # 12月30日（周二）
+        5
+    """
+    # 找到该月第一天
+    first_day = date.replace(day=1)
+    # 找到该月第一天是星期几（0=周一, 6=周日）
+    first_weekday = first_day.weekday()  # 0=周一, 6=周日
+    
+    # 计算该日期是当月的第几天（从1开始）
+    day_of_month = date.day
+    
+    # 计算该日期是当月的第几周
+    # 第一周：从该月第一天开始，到第一个周日结束（或到该周结束）
+    # 如果第一天是周一，那么第一周是第1-7天
+    # 如果第一天是周二，那么第一周是第1-6天，第二周从第7天开始
+    # 公式：((day_of_month - 1 + first_weekday) // 7) + 1
+    week_number = ((day_of_month - 1 + first_weekday) // 7) + 1
+    return week_number
 
 
 def build_obsidian_paths(
