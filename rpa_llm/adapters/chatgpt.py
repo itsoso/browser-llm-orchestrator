@@ -1071,18 +1071,26 @@ class ChatGPTAdapter(SiteAdapter):
                 if not use_js_inject:
                     # 修复：对于 ChatGPT（ProseMirror contenteditable），避免使用 type()，因为 type() 在 contenteditable 上不稳定
                     # 检测元素类型，如果是 contenteditable，强制使用 JS 注入而不是 type()
+                    # 修复：对于 ChatGPT，默认假设是 contenteditable（ProseMirror），除非明确检测到是 textarea
+                    # 这样可以避免检测失败时仍然使用 type()，导致输入失败
                     try:
                         # 检测元素类型
                         tb_kind = await self._tb_kind(tb)
-                        if tb_kind == "contenteditable":
+                        self._log(f"send: detected textbox kind: {tb_kind}")
+                        # 对于非 textarea（包括 contenteditable 和 unknown），都使用 JS 注入
+                        # 因为 ChatGPT 使用 ProseMirror（contenteditable），即使检测失败（返回 unknown），也不应该使用 type()
+                        if tb_kind != "textarea":
                             # 对于 contenteditable（ProseMirror），强制使用 JS 注入，避免 type() 导致的字符错乱
-                            self._log(f"send: detected contenteditable, forcing JS injection instead of type() to avoid character order issues...")
+                            self._log(f"send: detected {tb_kind}, forcing JS injection instead of type() to avoid character order issues...")
                             use_js_inject = True  # 强制使用 JS 注入
                             # 重新进入 JS 注入逻辑
                             continue  # 跳出当前逻辑，重新进入 JS 注入分支
-                    except Exception:
-                        # 检测失败不影响继续，使用原有逻辑
-                        pass
+                    except Exception as detect_err:
+                        # 检测失败时，默认假设是 contenteditable，使用 JS 注入
+                        # 这样可以避免在 ChatGPT（ProseMirror）上使用 type() 导致失败
+                        self._log(f"send: failed to detect textbox kind ({detect_err}), assuming contenteditable and using JS injection...")
+                        use_js_inject = True  # 默认使用 JS 注入
+                        continue  # 跳出当前逻辑，重新进入 JS 注入分支
                     
                     # 优化：短 prompt 使用轻量路径（fill/execCommand），避免 type() 的延迟
                     # 策略 A: 对于短 prompt，优先使用 _tb_set_text (fill/execCommand)
@@ -1283,17 +1291,24 @@ class ChatGPTAdapter(SiteAdapter):
                         # 修复：对于 contenteditable，不要使用 type()，而是使用 JS 注入
                         if not type_success:
                             # 再次检查元素类型，确保不是 contenteditable
+                            # 修复：对于非 textarea（包括 contenteditable 和 unknown），都使用 JS 注入
                             try:
                                 tb_kind = await self._tb_kind(tb)
-                                if tb_kind == "contenteditable":
+                                self._log(f"send: detected textbox kind before type(): {tb_kind}")
+                                # 对于非 textarea（包括 contenteditable 和 unknown），都使用 JS 注入
+                                # 因为 ChatGPT 使用 ProseMirror（contenteditable），即使检测失败（返回 unknown），也不应该使用 type()
+                                if tb_kind != "textarea":
                                     # 对于 contenteditable，强制使用 JS 注入，避免 type() 导致的字符错乱
-                                    self._log(f"send: detected contenteditable before type(), using JS injection instead...")
+                                    self._log(f"send: detected {tb_kind} before type(), using JS injection instead...")
                                     use_js_inject = True  # 强制使用 JS 注入
                                     # 重新进入 JS 注入逻辑
                                     continue  # 跳出当前逻辑，重新进入 JS 注入分支
-                            except Exception:
-                                # 检测失败，继续原有逻辑
-                                pass
+                            except Exception as detect_err:
+                                # 检测失败时，默认假设是 contenteditable，使用 JS 注入
+                                # 这样可以避免在 ChatGPT（ProseMirror）上使用 type() 导致失败
+                                self._log(f"send: failed to detect textbox kind before type() ({detect_err}), assuming contenteditable and using JS injection...")
+                                use_js_inject = True  # 默认使用 JS 注入
+                                continue  # 跳出当前逻辑，重新进入 JS 注入分支
                             
                             try:
                                 # 优化：使用 asyncio.wait_for 包装，确保超时被正确处理，避免 Future exception
