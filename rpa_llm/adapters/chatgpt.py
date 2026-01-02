@@ -551,66 +551,86 @@ class ChatGPTAdapter(SiteAdapter):
         Returns:
             True 如果确认发送成功，False 否则
         """
-        # A) 输入框清空（最可靠、最快）
-        try:
-            await self.page.wait_for_function(
-                """() => {
-                  const el = document.querySelector('#prompt-textarea');
-                  if (!el) return false;
-                  const t = (el.innerText || el.textContent || '').trim();
-                  return t.length === 0;
-                }""",
-                timeout=timeout_ms,
-            )
-            return True
-        except Exception:
-            pass
-
-        # B) user message 数 +1（强信号）
-        try:
-            combined_user_sel = ", ".join(self.USER_MSG)
-            await self.page.wait_for_function(
-                """(args) => {
-                  const u0 = args.u0;
-                  const sel = args.sel;
-                  const n = document.querySelectorAll(sel).length;
-                  return n > u0;
-                }""",
-                {"u0": user0, "sel": combined_user_sel},
-                timeout=timeout_ms,
-            )
-            return True
-        except Exception:
-            pass
+        # 优化：使用并行检查，加快确认速度
+        # 同时检查多个信号，只要有一个成功就返回 True
         
-        # C) stop button 出现（快速检查）
-        # 注意：`:has-text()` 是 Playwright 特有的选择器，不能用于原生 querySelectorAll
-        # 只使用原生 CSS 选择器（aria-label 属性选择器）
+        async def check_textbox_cleared() -> bool:
+            """检查输入框是否清空"""
+            try:
+                await self.page.wait_for_function(
+                    """() => {
+                      const el = document.querySelector('#prompt-textarea');
+                      if (!el) return false;
+                      const t = (el.innerText || el.textContent || '').trim();
+                      return t.length === 0;
+                    }""",
+                    timeout=timeout_ms,
+                )
+                return True
+            except Exception:
+                return False
+
+        async def check_user_count() -> bool:
+            """检查用户消息数是否增加"""
+            try:
+                combined_user_sel = ", ".join(self.USER_MSG)
+                await self.page.wait_for_function(
+                    """(args) => {
+                      const u0 = args.u0;
+                      const sel = args.sel;
+                      const n = document.querySelectorAll(sel).length;
+                      return n > u0;
+                    }""",
+                    {"u0": user0, "sel": combined_user_sel},
+                    timeout=timeout_ms,
+                )
+                return True
+            except Exception:
+                return False
+
+        async def check_stop_button() -> bool:
+            """检查停止按钮是否出现"""
+            try:
+                native_stop_selectors = [
+                    sel for sel in self.STOP_BTN 
+                    if ':has-text(' not in sel and 'aria-label' in sel
+                ]
+                if not native_stop_selectors:
+                    native_stop_selectors = ['button[aria-label*="Stop"]', 'button[aria-label*="停止"]']
+                combined_stop_sel = ", ".join(native_stop_selectors)
+                await self.page.wait_for_function(
+                    """(args) => {
+                      const sel = args.sel;
+                      try {
+                        const els = document.querySelectorAll(sel);
+                        for (let el of els) {
+                          if (el.offsetParent !== null) return true;
+                        }
+                      } catch (e) {
+                        return false;
+                      }
+                      return false;
+                    }""",
+                    {"sel": combined_stop_sel},
+                    timeout=min(timeout_ms, 800),  # stop button 检查最多 0.8 秒
+                )
+                return True
+            except Exception:
+                return False
+        
+        # 并行检查所有信号，只要有一个成功就返回 True
+        # 这样可以加快确认速度，避免串行等待
         try:
-            native_stop_selectors = [
-                sel for sel in self.STOP_BTN 
-                if ':has-text(' not in sel and 'aria-label' in sel
-            ]
-            if not native_stop_selectors:
-                native_stop_selectors = ['button[aria-label*="Stop"]', 'button[aria-label*="停止"]']
-            combined_stop_sel = ", ".join(native_stop_selectors)
-            await self.page.wait_for_function(
-                """(args) => {
-                  const sel = args.sel;
-                  try {
-                    const els = document.querySelectorAll(sel);
-                    for (let el of els) {
-                      if (el.offsetParent !== null) return true;
-                    }
-                  } catch (e) {
-                    return false;
-                  }
-                  return false;
-                }""",
-                {"sel": combined_stop_sel},
-                timeout=min(timeout_ms, 800),  # stop button 检查最多 0.8 秒
+            results = await asyncio.gather(
+                check_textbox_cleared(),
+                check_user_count(),
+                check_stop_button(),
+                return_exceptions=True
             )
-            return True
+            # 只要有一个返回 True，就认为发送成功
+            for result in results:
+                if isinstance(result, bool) and result:
+                    return True
         except Exception:
             pass
         
@@ -628,30 +648,48 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("send: pressing Control+Enter (fast path)...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 优化：使用更短的等待时间，加快确认速度
-        # 立即检查（0.05秒等待，让事件触发）
-        await asyncio.sleep(0.05)
+        # 优化：使用更短的等待时间和更长的超时，平衡速度和可靠性
+        # 立即检查（0.1秒等待，让事件触发）
+        await asyncio.sleep(0.1)
         
-        # 快速确认（0.8秒超时，减少等待时间）
-        if await self._fast_send_confirm(user0, timeout_ms=800):
+        # 快速确认（1.5秒超时，给足够时间让页面响应）
+        if await self._fast_send_confirm(user0, timeout_ms=1500):
             self._log("send: fast path confirmed (first attempt)")
             return
         
-        # 如果立即检查失败，再等待 0.1 秒后检查一次（减少等待时间）
-        await asyncio.sleep(0.1)
-        if await self._fast_send_confirm(user0, timeout_ms=700):
+        # 如果立即检查失败，再等待 0.2 秒后检查一次
+        await asyncio.sleep(0.2)
+        if await self._fast_send_confirm(user0, timeout_ms=1200):
             self._log("send: fast path confirmed (after short wait)")
             return
         
-        # 兜底：再按一次 Control+Enter（但减少等待时间）
+        # 优化：在第二次尝试之前，先检查是否实际上已经发送了（可能确认逻辑有延迟）
+        try:
+            current_user_count = await self._user_count()
+            if current_user_count > user0:
+                self._log(f"send: user_count increased ({user0} -> {current_user_count}), send actually succeeded")
+                return
+        except Exception:
+            pass
+        
+        # 兜底：再按一次 Control+Enter
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
         
-        # 再次确认（0.8秒超时）
-        if await self._fast_send_confirm(user0, timeout_ms=800):
+        # 再次确认（1.5秒超时）
+        if await self._fast_send_confirm(user0, timeout_ms=1500):
             self._log("send: fast path confirmed (second attempt)")
             return
+        
+        # 最后检查：可能已经发送了，但确认逻辑没有及时检测到
+        try:
+            current_user_count = await self._user_count()
+            if current_user_count > user0:
+                self._log(f"send: user_count increased after second attempt ({user0} -> {current_user_count}), send actually succeeded")
+                return
+        except Exception:
+            pass
         
         # 如果还是失败，抛出异常（让上层处理）
         raise RuntimeError("send not accepted after 2 Control+Enter attempts")
