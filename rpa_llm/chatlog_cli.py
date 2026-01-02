@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import yaml
+
 from .chatlog_client import ChatlogClient
 from .models import Task, ModelResult
 from .vault import (
@@ -270,11 +272,25 @@ def main():
     if args.vault_path:
         vault_path = Path(args.vault_path).expanduser().resolve()
     
-    # 获取 driver_url
+    # 获取 driver_url（优先级：命令行参数 > 环境变量 > brief.yaml）
     driver_url = args.driver_url or None
     if not driver_url:
         import os
         driver_url = os.environ.get("RPA_DRIVER_URL", "").strip() or None
+    
+    # 如果还没有，尝试从 brief.yaml 读取
+    if not driver_url:
+        try:
+            import yaml
+            brief_path = Path("brief.yaml")
+            if brief_path.exists():
+                brief_data = yaml.safe_load(brief_path.read_text(encoding="utf-8"))
+                driver_url = brief_data.get("output", {}).get("driver_url", "").strip() or None
+                if driver_url:
+                    print(f"[{beijing_now_iso()}] [chatlog] 从 brief.yaml 读取 driver_url: {driver_url}")
+        except Exception as e:
+            # 忽略错误，继续执行
+            pass
     
     # 解析时间
     start = None
