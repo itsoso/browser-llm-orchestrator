@@ -1104,6 +1104,25 @@ class ChatGPTAdapter(SiteAdapter):
                             err_msg = str(set_text_err) if set_text_err else "timeout or unknown error"
                             self._log(f"send: _tb_set_text failed ({err_msg}), trying type()...")
                             
+                            # 修复：_tb_set_text 可能部分成功（输入了一部分内容），需要先清空，避免重复输入
+                            try:
+                                existing_before_clear = await self._tb_get_text(tb)
+                                if existing_before_clear.strip():
+                                    existing_len = len(existing_before_clear.strip())
+                                    self._log(f"send: _tb_set_text failed but textbox has content (len={existing_len}), clearing before type()...")
+                                    await self._tb_clear(tb)
+                                    await asyncio.sleep(0.3)
+                                    # 验证是否清空
+                                    check_after_clear = await self._tb_get_text(tb)
+                                    if check_after_clear.strip():
+                                        # 如果还有内容，再清空一次
+                                        self._log(f"send: textbox still has content after first clear, clearing again...")
+                                        await self._tb_clear(tb)
+                                        await asyncio.sleep(0.2)
+                            except Exception as clear_err:
+                                self._log(f"send: failed to clear textbox before type(): {clear_err}")
+                                # 清空失败不致命，继续尝试 type()
+                            
                             # 确保元素有焦点
                             try:
                                 await asyncio.wait_for(tb.focus(), timeout=2.0)  # 从 3 秒减少到 2 秒
@@ -1130,6 +1149,7 @@ class ChatGPTAdapter(SiteAdapter):
                             pass
                         
                         # 修复：在 type() 之前检查输入框是否已有内容（防止重复输入）
+                        # 注意：如果 _tb_set_text 失败，已经在上面清空了，这里主要是双重检查
                         try:
                             existing_text = await self._tb_get_text(tb)
                             if existing_text.strip():
@@ -1149,6 +1169,11 @@ class ChatGPTAdapter(SiteAdapter):
                                         self._log(f"send: textbox content appears duplicated (ratio={existing_ratio:.2%}), clearing...")
                                         await self._tb_clear(tb)
                                         await asyncio.sleep(0.3)
+                                else:
+                                    # 如果内容不完整（ratio < 0.80），也应该清空，避免追加
+                                    self._log(f"send: textbox has partial content (len={existing_len}, ratio={existing_ratio:.2%}), clearing to avoid appending...")
+                                    await self._tb_clear(tb)
+                                    await asyncio.sleep(0.2)
                         except Exception:
                             pass  # 检查失败不影响继续
                         
@@ -1337,21 +1362,28 @@ class ChatGPTAdapter(SiteAdapter):
                 expected_len = len(prompt_clean)
                 len_ratio = actual_len / expected_len if expected_len > 0 else 0
                 
-                # 修复：如果 ratio > 150%，说明内容可能被重复输入了，需要清空并重试
-                if len_ratio > 1.50:
-                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 150%), clearing and retrying...")
+                # 修复：如果 ratio > 120%，说明内容可能被重复输入了，需要清空并重试
+                # 降低阈值从 150% 到 120%，更早检测重复输入
+                if len_ratio > 1.20:
+                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 120%), clearing and retrying...")
                     # 清空并重试
                     try:
-                        await self._tb_clear(tb)
-                        await asyncio.sleep(0.5)
-                        # 验证是否清空
-                        check = await self._tb_get_text(tb)
-                        if check.strip():
-                            # 如果还有内容，再清空一次
+                        # 多次清空，确保彻底清空
+                        for clear_retry in range(3):
                             await self._tb_clear(tb)
-                            await asyncio.sleep(0.3)
-                    except Exception:
-                        pass
+                            await asyncio.sleep(0.2)
+                            # 验证是否清空
+                            check = await self._tb_get_text(tb)
+                            if not check.strip():
+                                break
+                        # 最终验证
+                        final_check = await self._tb_get_text(tb)
+                        if final_check.strip():
+                            self._log(f"send: warning - textbox still has content after clear: '{final_check[:50]}...'")
+                        else:
+                            self._log(f"send: textbox cleared successfully")
+                    except Exception as clear_err:
+                        self._log(f"send: failed to clear textbox: {clear_err}")
                     continue  # 触发下一次重试
                 
                 # 检查长度是否足够（至少 80% 即可接受，避免过度重试导致重复发送）
@@ -1449,21 +1481,28 @@ class ChatGPTAdapter(SiteAdapter):
                 
                 # 额外检查：验证开头和结尾是否匹配（防止中间截断）
                 # 但如果内容已经达到 80%，即使开头/结尾不完全匹配，也接受（避免过度重试）
-                # 修复：如果 ratio > 150%，说明内容可能被重复输入了，需要清空并重试
-                if len_ratio > 1.50:
-                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 150%), clearing and retrying...")
+                # 修复：如果 ratio > 120%，说明内容可能被重复输入了，需要清空并重试
+                # 降低阈值从 150% 到 120%，更早检测重复输入
+                if len_ratio > 1.20:
+                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 120%), clearing and retrying...")
                     # 清空并重试
                     try:
-                        await self._tb_clear(tb)
-                        await asyncio.sleep(0.5)
-                        # 验证是否清空
-                        check = await self._tb_get_text(tb)
-                        if check.strip():
-                            # 如果还有内容，再清空一次
+                        # 多次清空，确保彻底清空
+                        for clear_retry in range(3):
                             await self._tb_clear(tb)
-                            await asyncio.sleep(0.3)
-                    except Exception:
-                        pass
+                            await asyncio.sleep(0.2)
+                            # 验证是否清空
+                            check = await self._tb_get_text(tb)
+                            if not check.strip():
+                                break
+                        # 最终验证
+                        final_check = await self._tb_get_text(tb)
+                        if final_check.strip():
+                            self._log(f"send: warning - textbox still has content after clear: '{final_check[:50]}...'")
+                        else:
+                            self._log(f"send: textbox cleared successfully")
+                    except Exception as clear_err:
+                        self._log(f"send: failed to clear textbox: {clear_err}")
                     continue  # 触发下一次重试
                 
                 if actual_clean and prompt_clean and len_ratio >= 0.80:
