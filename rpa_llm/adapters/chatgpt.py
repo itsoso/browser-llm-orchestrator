@@ -1551,6 +1551,7 @@ class ChatGPTAdapter(SiteAdapter):
                 # 但如果内容已经达到 80%，即使开头/结尾不完全匹配，也接受（避免过度重试）
                 # 修复：如果 ratio > 120%，说明内容可能被重复输入了，需要清空并重试
                 # 降低阈值从 150% 到 120%，更早检测重复输入
+                # 关键修复：必须在进入验证逻辑之前检查，防止 ratio > 120% 时仍然通过验证
                 if len_ratio > 1.20:
                     self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 120%), clearing and retrying...")
                     # 清空并重试
@@ -1571,6 +1572,21 @@ class ChatGPTAdapter(SiteAdapter):
                             self._log(f"send: textbox cleared successfully")
                     except Exception as clear_err:
                         self._log(f"send: failed to clear textbox: {clear_err}")
+                    continue  # 触发下一次重试
+                
+                # 关键修复：在进入验证逻辑之前，再次检查 ratio，防止 ratio > 120% 时仍然通过验证
+                # 这是双重保险，确保不会因为代码执行路径问题而跳过重复检测
+                if len_ratio > 1.20:
+                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 120%), clearing and retrying (second check)...")
+                    try:
+                        for clear_retry in range(3):
+                            await self._tb_clear(tb)
+                            await asyncio.sleep(0.2)
+                            check = await self._tb_get_text(tb)
+                            if not check.strip():
+                                break
+                    except Exception as clear_err:
+                        self._log(f"send: failed to clear textbox (second check): {clear_err}")
                     continue  # 触发下一次重试
                 
                 if actual_clean and prompt_clean and len_ratio >= 0.80:
@@ -1595,6 +1611,21 @@ class ChatGPTAdapter(SiteAdapter):
                             self._log(f"send: accepting despite end mismatch (ratio={len_ratio:.2%} >= 80%)")
                         else:
                             continue
+                
+                # 关键修复：在最终验证通过之前，最后一次检查 ratio，防止 ratio > 120% 时仍然通过验证
+                # 这是三重保险，确保绝对不会让重复输入通过验证
+                if len_ratio > 1.20:
+                    self._log(f"send: content appears duplicated (ratio={len_ratio:.2%} > 120%), clearing and retrying (final check before verification)...")
+                    try:
+                        for clear_retry in range(3):
+                            await self._tb_clear(tb)
+                            await asyncio.sleep(0.2)
+                            check = await self._tb_get_text(tb)
+                            if not check.strip():
+                                break
+                    except Exception as clear_err:
+                        self._log(f"send: failed to clear textbox (final check): {clear_err}")
+                    continue  # 触发下一次重试
                 
                 self._log(f"send: content verified OK (len={actual_len}, ratio={len_ratio:.2%})")
                 prompt_sent = True
