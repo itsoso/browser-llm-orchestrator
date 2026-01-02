@@ -209,7 +209,7 @@ def build_dual_model_arbitration_prompt(
         1. **输出格式**：
            - 只输出纯 Markdown 格式，不要输出任何解释性文字、代码块标记或 YAML frontmatter
            - 不要输出 "我将遵守规则"、"以下是报告" 等前言
-           - 直接以 `# 最终仲裁报告：{topic}` 开始
+           - 直接以 `# 最终报告：{topic}` 开始
            - 确保所有 Markdown 语法正确，能够被 Obsidian 正确渲染
         
         2. **标题层级与空行**（关键：美观的视觉层次）：
@@ -308,7 +308,7 @@ def build_dual_model_arbitration_prompt(
 
         ---
 
-        # 最终仲裁报告：{topic}
+        # 最终报告：{topic}
 
         ## 0. 背景与问题
         **背景**：
