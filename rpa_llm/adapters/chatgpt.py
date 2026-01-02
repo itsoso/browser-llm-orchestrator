@@ -301,8 +301,25 @@ class ChatGPTAdapter(SiteAdapter):
         return None
 
     async def _ready_check_textbox(self) -> bool:
-        await self._dismiss_overlays()
-        return (await self._find_textbox_any_frame()) is not None
+        """检查输入框是否就绪（用于 manual checkpoint 的 ready_check）"""
+        try:
+            await self._dismiss_overlays()
+        except Exception:
+            pass  # dismiss_overlays 失败不影响继续检查
+        
+        # 多次尝试查找，增加成功率
+        for attempt in range(3):
+            try:
+                found = await self._find_textbox_any_frame()
+                if found:
+                    return True
+            except Exception:
+                pass
+            
+            if attempt < 2:
+                await asyncio.sleep(0.3)  # 等待一下再重试
+        
+        return False
 
     async def _fast_ready_check(self) -> bool:
         """
@@ -623,10 +640,32 @@ class ChatGPTAdapter(SiteAdapter):
             max_wait_s=90,
         )
 
-        # 人工处理后再确认一次
-        if not await self._ready_check_textbox():
-            await self.save_artifacts("ensure_ready_failed_after_manual")
-            raise RuntimeError("ensure_ready: still cannot locate textbox after manual checkpoint.")
+        # 人工处理后再确认一次（增加重试和等待时间）
+        # 给页面更多时间稳定，因为用户可能刚刚完成了操作
+        await asyncio.sleep(1.0)  # 等待页面稳定
+        
+        # 多次尝试，增加成功率
+        for retry in range(5):
+            try:
+                if await self._ready_check_textbox():
+                    self._log(f"ensure_ready: textbox found after manual checkpoint (retry {retry+1})")
+                    return
+            except Exception as e:
+                self._log(f"ensure_ready: ready_check_textbox error (retry {retry+1}): {e}")
+            
+            if retry < 4:
+                await asyncio.sleep(0.5)  # 等待后重试
+        
+        # 如果所有重试都失败，再尝试一次快速检查
+        try:
+            if await self._fast_ready_check():
+                self._log("ensure_ready: textbox found via fast_ready_check after manual checkpoint")
+                return
+        except Exception:
+            pass
+        
+        await self.save_artifacts("ensure_ready_failed_after_manual")
+        raise RuntimeError("ensure_ready: still cannot locate textbox after manual checkpoint.")
 
     async def new_chat(self) -> None:
         self._log("new_chat: best effort")
