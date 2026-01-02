@@ -2153,6 +2153,7 @@ class ChatGPTAdapter(SiteAdapter):
             self._log(f"ask: send phase done ({time.time()-t_send:.2f}s)")
 
             # P1优化：等待 assistant 消息出现（使用 wait_for_function 事件驱动，替代轮询）
+            # 关键修复：优先检测 thinking 状态，避免过早触发 manual checkpoint
             self._log("ask: waiting for assistant message (using wait_for_function event-driven)...")
             t1 = time.time()
             elapsed = time.time() - ask_start_time
@@ -2163,15 +2164,36 @@ class ChatGPTAdapter(SiteAdapter):
             assistant_wait_timeout = min(remaining * 0.2, 15)  # 最多15秒（从 90 秒减少到 15 秒）
             n_assist1 = n_assist0
             
+            # 关键修复：在开始等待之前，先检查一次 thinking 状态
+            # 如果已经在思考，可以提前知道，避免不必要的等待
+            try:
+                thinking_precheck = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
+                if thinking_precheck:
+                    self._log("ask: detected thinking mode before assistant wait, will prioritize thinking detection")
+            except Exception:
+                pass  # 检测失败不影响主流程
+            
             # P1优化：使用高频轮询 + wait_for_function 混合策略
             # 先尝试高频轮询（更快），如果失败再使用 wait_for_function（更可靠）
             combined_sel = ", ".join(self.ASSISTANT_MSG)
             
             # 优化：先尝试高频轮询（最多 2.0 秒），这样可以更快检测到新消息
+            # 关键修复：在轮询过程中，定期检测 thinking 状态
             n_assist1 = n_assist0
             polling_success = False
+            thinking_detected_during_polling = False
             for attempt in range(200):  # 2.0 秒 / 0.01 秒 = 200 次（增加轮询次数）
                 try:
+                    # 每 50 次检查（0.5 秒）检测一次 thinking 状态
+                    if attempt > 0 and attempt % 50 == 0:
+                        try:
+                            thinking_check = await asyncio.wait_for(self._is_thinking(), timeout=0.1)
+                            if thinking_check:
+                                thinking_detected_during_polling = True
+                                self._log(f"ask: detected thinking mode during polling (attempt {attempt+1})")
+                        except Exception:
+                            pass  # thinking 检测失败不影响轮询
+                    
                     current_count = await asyncio.wait_for(
                         self.page.evaluate(
                             """(sel) => {
@@ -2194,6 +2216,10 @@ class ChatGPTAdapter(SiteAdapter):
                     pass  # 其他异常继续轮询
                 
                 await asyncio.sleep(0.01)  # 从 0.015 秒减少到 0.01 秒，更激进
+            
+            # 如果轮询过程中检测到 thinking，设置标志
+            if thinking_detected_during_polling:
+                self._log("ask: thinking mode detected during polling, will prioritize thinking detection in fallback")
             
             # 如果高频轮询失败，使用 wait_for_function（事件驱动，更可靠）
             if not polling_success:
@@ -2222,54 +2248,103 @@ class ChatGPTAdapter(SiteAdapter):
                     n_assist1 = await self._assistant_count()
                     self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via wait_for_function)")
                 except Exception as e:
-                    # wait_for_function 超时或失败，立即检查文本变化（而不是等待更长时间）
-                    # 优化：如果 wait_for_function 超时，立即检查文本变化，这样可以更快检测到新消息
-                    self._log(f"ask: wait_for_function timeout or failed ({e}), checking text change immediately...")
+                    # wait_for_function 超时或失败，优先检查 thinking 状态
+                    # 关键修复：在检查文本变化之前，先检查是否在思考模式
+                    self._log(f"ask: wait_for_function timeout or failed ({e}), checking thinking status first...")
+                    
+                    # 优先检测 thinking 状态
                     try:
-                        # 先快速检查计数
-                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.5)  # 从 0.8 秒减少到 0.5 秒
-                        if n_assist1 > n_assist0:
-                            self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
+                        thinking = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                        if thinking:
+                            self._log("ask: detected thinking mode, continuing to wait (will not trigger manual checkpoint)")
+                            # 如果检测到 thinking，继续等待，不触发 manual checkpoint
+                            # 设置一个合成值，让后续逻辑继续等待
+                            n_assist1 = n_assist0 + 1  # 合成值，表示"可能正在思考"
+                            # 跳过 manual checkpoint，直接进入内容等待阶段
+                            self._log("ask: skipping manual checkpoint due to thinking mode")
                         else:
-                            # 如果计数没有增加，立即检查文本变化（这是更可靠的信号）
+                            # 如果没有在思考，继续原有的检查逻辑
+                            self._log("ask: not in thinking mode, checking text change...")
                             try:
-                                text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.5)  # 从 0.6 秒减少到 0.5 秒
-                                if text_quick and text_quick != last_assist_text_before:
-                                    self._log("ask: text changed, assuming new message (text change detected)")
-                                    n_assist1 = n_assist0 + 1  # 合成值
+                                # 先快速检查计数
+                                n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.5)
+                                if n_assist1 > n_assist0:
+                                    self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
                                 else:
-                                    # P1优化：如果文本也没有变化，再等待一下（最多 1 秒）然后再次检查
-                                    # 从 2 秒减少到 1 秒，加快检测速度
-                                    self._log("ask: no text change yet, waiting 1s and re-checking...")
-                                    await asyncio.sleep(1.0)  # 从 2.0 秒减少到 1.0 秒
-                                    # 再次检查文本变化
+                                    # 如果计数没有增加，立即检查文本变化（这是更可靠的信号）
                                     try:
-                                        text_retry = await asyncio.wait_for(self._last_assistant_text(), timeout=0.5)
-                                        if text_retry and text_retry != last_assist_text_before:
-                                            self._log("ask: text changed after wait, assuming new message")
-                                            n_assist1 = n_assist0 + 1
+                                        text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.5)
+                                        if text_quick and text_quick != last_assist_text_before:
+                                            self._log("ask: text changed, assuming new message (text change detected)")
+                                            n_assist1 = n_assist0 + 1  # 合成值
                                         else:
-                                            # 如果还是没有变化，检查计数
-                                            n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.5)
-                                            if n_assist1 <= n_assist0:
-                                                n_assist1 = n_assist0  # 保持原值，触发 manual checkpoint
+                                            # 如果文本也没有变化，再检查一次 thinking 状态（双重保险）
+                                            thinking_retry = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                                            if thinking_retry:
+                                                self._log("ask: detected thinking mode on retry, continuing to wait")
+                                                n_assist1 = n_assist0 + 1  # 合成值，继续等待
+                                            else:
+                                                # 如果还是没有变化且不在思考，等待一下再检查
+                                                self._log("ask: no text change and not thinking, waiting 1s and re-checking...")
+                                                await asyncio.sleep(1.0)
+                                                # 再次检查文本变化和 thinking 状态
+                                                try:
+                                                    text_retry = await asyncio.wait_for(self._last_assistant_text(), timeout=0.5)
+                                                    thinking_final = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                                                    if text_retry and text_retry != last_assist_text_before:
+                                                        self._log("ask: text changed after wait, assuming new message")
+                                                        n_assist1 = n_assist0 + 1
+                                                    elif thinking_final:
+                                                        self._log("ask: still in thinking mode after wait, continuing")
+                                                        n_assist1 = n_assist0 + 1  # 合成值，继续等待
+                                                    else:
+                                                        # 如果还是没有变化且不在思考，检查计数
+                                                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.5)
+                                                        if n_assist1 <= n_assist0:
+                                                            n_assist1 = n_assist0  # 保持原值，可能触发 manual checkpoint
+                                                except Exception:
+                                                    n_assist1 = n_assist0  # 保持原值
                                     except Exception:
                                         n_assist1 = n_assist0  # 保持原值
                             except Exception:
                                 n_assist1 = n_assist0  # 保持原值
-                    except Exception:
-                        n_assist1 = n_assist0  # 保持原值
+                    except Exception as thinking_err:
+                        # thinking 检测失败，继续原有的检查逻辑
+                        self._log(f"ask: thinking detection failed ({thinking_err}), falling back to text change check...")
+                        try:
+                            n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.5)
+                            if n_assist1 > n_assist0:
+                                self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
+                            else:
+                                n_assist1 = n_assist0  # 保持原值
+                        except Exception:
+                            n_assist1 = n_assist0  # 保持原值
                 
-                # 如果仍然没有检测到新消息，触发 manual checkpoint（但减少等待时间）
+                # 如果仍然没有检测到新消息，且不在思考模式，触发 manual checkpoint
                 if n_assist1 <= n_assist0:
-                    await self.save_artifacts("no_assistant_reply")
-                    # 优化：减少 manual checkpoint 的等待时间，从 30 秒减少到 15 秒
-                    # 这样可以更快地检测到新消息，而不是等待 30 秒
-                    await self.manual_checkpoint(
-                        "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
-                        ready_check=self._ready_check_textbox,
-                        max_wait_s=min(15, timeout_s - elapsed - 5),  # 从 30 秒减少到 15 秒（P0优化）
-                    )
+                    # 最后再检查一次 thinking 状态（三重保险）
+                    try:
+                        thinking_final_check = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                        if thinking_final_check:
+                            self._log("ask: detected thinking mode before manual checkpoint, skipping checkpoint")
+                            n_assist1 = n_assist0 + 1  # 合成值，继续等待
+                        else:
+                            await self.save_artifacts("no_assistant_reply")
+                            # 优化：减少 manual checkpoint 的等待时间，从 30 秒减少到 15 秒
+                            # 这样可以更快地检测到新消息，而不是等待 30 秒
+                            await self.manual_checkpoint(
+                                "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
+                                ready_check=self._ready_check_textbox,
+                                max_wait_s=min(15, timeout_s - elapsed - 5),  # 从 30 秒减少到 15 秒（P0优化）
+                            )
+                    except Exception:
+                        # thinking 检测失败，触发 manual checkpoint
+                        await self.save_artifacts("no_assistant_reply")
+                        await self.manual_checkpoint(
+                            "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
+                            ready_check=self._ready_check_textbox,
+                            max_wait_s=min(15, timeout_s - elapsed - 5),
+                        )
                     # manual_checkpoint 后再次检查
                     try:
                         n_assist1 = await self._assistant_count()
