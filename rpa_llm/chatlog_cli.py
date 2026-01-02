@@ -42,8 +42,13 @@ DEFAULT_PROMPT_TEMPLATE = """你是资深研究员/分析师。请分析以下�
 async def analyze_chatlog_conversations(
     chatlog_url: str,
     chatlog_api_key: Optional[str],
-    conversation_ids: Optional[List[str]],
-    limit: int = 10,
+    talker: str,
+    time_range: Optional[str] = None,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    sender: Optional[str] = None,
+    keyword: Optional[str] = None,
+    limit: int = 100,
     sites: List[str] = None,
     prompt_template: str = None,
     vault_path: Path = None,
@@ -55,10 +60,15 @@ async def analyze_chatlog_conversations(
     从 chatlog 获取聊天记录并分析
     
     Args:
-        chatlog_url: chatlog 服务地址
-        chatlog_api_key: API 密钥（可选）
-        conversation_ids: 指定的对话 ID 列表（可选）
-        limit: 如果未指定 ID，获取最近 N 条
+        chatlog_url: chatlog 服务地址，如 http://127.0.0.1:5030
+        chatlog_api_key: API 密钥（可选，当前 API 不需要）
+        talker: 聊天对象标识（必填，支持 wxid、群聊 ID、备注名、昵称等）
+        time_range: 时间范围字符串，格式为 "YYYY-MM-DD" 或 "YYYY-MM-DD~YYYY-MM-DD"
+        start: 起始时间（如果未提供 time_range）
+        end: 结束时间（如果未提供 time_range）
+        sender: 发送者（可选）
+        keyword: 关键词（可选）
+        limit: 返回记录数量限制（默认 100）
         sites: 使用的 LLM 站点，默认 ["chatgpt", "gemini"]
         prompt_template: 分析 prompt 模板
         vault_path: Obsidian vault 路径
@@ -77,23 +87,20 @@ async def analyze_chatlog_conversations(
     
     try:
         # 获取聊天记录
-        if conversation_ids:
-            print(f"[{beijing_now_iso()}] [chatlog] 获取指定的 {len(conversation_ids)} 条聊天记录...")
-            conversations = []
-            for conv_id in conversation_ids:
-                try:
-                    conv = await client.get_conversation(conv_id)
-                    conversations.append(conv)
-                    print(f"[{beijing_now_iso()}] [chatlog] ✓ 获取对话: {conv.get('title', conv_id)}")
-                except Exception as e:
-                    print(f"[{beijing_now_iso()}] [chatlog] ✗ 获取对话 {conv_id} 失败: {e}")
-        else:
-            print(f"[{beijing_now_iso()}] [chatlog] 获取最近 {limit} 条聊天记录...")
-            conversations = await client.get_conversations(limit=limit)
-            print(f"[{beijing_now_iso()}] [chatlog] ✓ 获取到 {len(conversations)} 条聊天记录")
+        print(f"[{beijing_now_iso()}] [chatlog] 获取聊天记录: talker={talker}, time_range={time_range or 'auto'}")
         
-        if not conversations:
-            print(f"[{beijing_now_iso()}] [chatlog] 未获取到任何聊天记录，退出")
+        messages = await client.get_conversations(
+            talker=talker,
+            time_range=time_range,
+            start=start,
+            end=end,
+            limit=limit,
+        )
+        
+        print(f"[{beijing_now_iso()}] [chatlog] ✓ 获取到 {len(messages)} 条消息")
+        
+        if not messages:
+            print(f"[{beijing_now_iso()}] [chatlog] 未获取到任何消息，退出")
             return
         
         # 为每条聊天记录创建分析任务
@@ -111,6 +118,14 @@ async def analyze_chatlog_conversations(
         for p in vault_paths.values():
             ensure_dir(p)
         
+        # 确定对话标题
+        if messages:
+            first_msg = messages[0]
+            talker_name = first_msg.get("talkerName", first_msg.get("talker", talker))
+            conv_title = f"与 {talker_name} 的聊天记录"
+        else:
+            conv_title = f"与 {talker} 的聊天记录"
+        
         # 创建 run index
         run_index_path = vault_paths["run_root"] / "README.md"
         write_markdown(
@@ -120,41 +135,39 @@ async def analyze_chatlog_conversations(
                 "created": utc_now_iso(),
                 "author": "browser-orchestrator",
                 "run_id": run_id,
-                "topic": f"Chatlog Analysis ({len(conversations)} conversations)",
+                "topic": f"Chatlog Analysis: {conv_title}",
                 "tags": tags[:12],
             },
-            build_run_index_note(run_id, f"Chatlog Analysis ({len(conversations)} conversations)", tags)
+            build_run_index_note(run_id, f"Chatlog Analysis: {conv_title}", tags)
         )
         
-        # 处理每条聊天记录
+        # 处理聊天记录
         all_results: List[ModelResult] = []
         
-        for idx, conv in enumerate(conversations, 1):
-            conv_title = conv.get("title", conv.get("name", "未命名对话"))
-            print(f"\n[{beijing_now_iso()}] [chatlog] 处理第 {idx}/{len(conversations)} 条记录: {conv_title}")
+        print(f"\n[{beijing_now_iso()}] [chatlog] 处理聊天记录: {conv_title} ({len(messages)} 条消息)")
+        
+        # 格式化聊天记录
+        formatted_conv = client.format_messages_for_prompt(messages, talker=talker)
+        
+        # 构建 prompt
+        prompt = prompt_template.format(conversation_content=formatted_conv)
             
-            # 格式化聊天记录
-            formatted_conv = client.format_conversation_for_prompt(conv)
-            
-            # 构建 prompt
-            prompt = prompt_template.format(conversation_content=formatted_conv)
-            
-            # 创建任务
-            tasks = []
-            for site in sites:
-                tasks.append(Task(
-                    run_id=run_id,
-                    site_id=site,
-                    stream_id="chatlog_analysis",
-                    stream_name="Chatlog Analysis",
-                    topic=conv_title,
-                    prompt=prompt,
-                ))
-            
-            # 执行分析（使用 driver_server 或本地 adapter）
-            if driver_url:
-                # 使用 driver_server
-                for task in tasks:
+        # 创建任务
+        tasks = []
+        for site in sites:
+            tasks.append(Task(
+                run_id=run_id,
+                site_id=site,
+                stream_id="chatlog_analysis",
+                stream_name="Chatlog Analysis",
+                topic=conv_title,
+                prompt=prompt,
+            ))
+        
+        # 执行分析（使用 driver_server 或本地 adapter）
+        if driver_url:
+            # 使用 driver_server
+            for task in tasks:
                     try:
                         payload = await asyncio.to_thread(
                             driver_run_task, 
@@ -216,11 +229,11 @@ async def analyze_chatlog_conversations(
                         print(f"[{beijing_now_iso()}] [chatlog] ✓ {task.site_id} 分析完成: {conv_title}")
                     except Exception as e:
                         print(f"[{beijing_now_iso()}] [chatlog] ✗ {task.site_id} 分析失败: {e}")
-            else:
-                # 使用本地 adapter（需要实现）
-                print(f"[{beijing_now_iso()}] [chatlog] 警告: 未提供 driver_url，跳过本地 adapter 模式")
+        else:
+            # 使用本地 adapter（需要实现）
+            print(f"[{beijing_now_iso()}] [chatlog] 警告: 未提供 driver_url，跳过本地 adapter 模式")
         
-        print(f"\n[{beijing_now_iso()}] [chatlog] 分析完成！共处理 {len(conversations)} 条记录")
+        print(f"\n[{beijing_now_iso()}] [chatlog] 分析完成！共处理 {len(messages)} 条消息")
         print(f"[{beijing_now_iso()}] [chatlog] 结果保存到: {vault_paths['run_root']}")
         
     finally:
@@ -229,10 +242,15 @@ async def analyze_chatlog_conversations(
 
 def main():
     parser = argparse.ArgumentParser(description="从 chatlog 获取聊天记录并发送到 LLM 分析")
-    parser.add_argument("--chatlog-url", required=True, help="chatlog 服务地址，如 http://localhost:8080")
-    parser.add_argument("--chatlog-api-key", default=None, help="chatlog API 密钥（可选）")
-    parser.add_argument("--conversation-ids", nargs="+", default=None, help="指定的对话 ID 列表")
-    parser.add_argument("--limit", type=int, default=10, help="如果未指定 ID，获取最近 N 条（默认: 10）")
+    parser.add_argument("--chatlog-url", required=True, help="chatlog 服务地址，如 http://127.0.0.1:5030")
+    parser.add_argument("--chatlog-api-key", default=None, help="chatlog API 密钥（可选，当前 API 不需要）")
+    parser.add_argument("--talker", required=True, help="聊天对象标识（必填，支持 wxid、群聊 ID、备注名、昵称等）")
+    parser.add_argument("--time-range", default=None, help="时间范围，格式为 YYYY-MM-DD 或 YYYY-MM-DD~YYYY-MM-DD（默认: 今天）")
+    parser.add_argument("--start", default=None, help="起始时间，格式为 YYYY-MM-DD（如果未提供 time-range）")
+    parser.add_argument("--end", default=None, help="结束时间，格式为 YYYY-MM-DD（如果未提供 time-range）")
+    parser.add_argument("--sender", default=None, help="发送者过滤（可选）")
+    parser.add_argument("--keyword", default=None, help="关键词过滤（可选）")
+    parser.add_argument("--limit", type=int, default=100, help="返回记录数量限制（默认: 100）")
     parser.add_argument("--sites", nargs="+", default=["chatgpt", "gemini"], help="使用的 LLM 站点（默认: chatgpt gemini）")
     parser.add_argument("--prompt-template", default=None, help="分析 prompt 模板文件路径（可选）")
     parser.add_argument("--vault-path", default=None, help="Obsidian vault 路径（默认: ~/work/personal/obsidian/personal）")
@@ -258,10 +276,23 @@ def main():
         import os
         driver_url = os.environ.get("RPA_DRIVER_URL", "").strip() or None
     
+    # 解析时间
+    start = None
+    end = None
+    if args.start:
+        start = datetime.strptime(args.start, "%Y-%m-%d")
+    if args.end:
+        end = datetime.strptime(args.end, "%Y-%m-%d")
+    
     asyncio.run(analyze_chatlog_conversations(
         chatlog_url=args.chatlog_url,
         chatlog_api_key=args.chatlog_api_key,
-        conversation_ids=args.conversation_ids,
+        talker=args.talker,
+        time_range=args.time_range,
+        start=start,
+        end=end,
+        sender=args.sender,
+        keyword=args.keyword,
         limit=args.limit,
         sites=args.sites,
         prompt_template=prompt_template,
