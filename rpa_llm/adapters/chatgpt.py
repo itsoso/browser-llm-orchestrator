@@ -384,9 +384,11 @@ class ChatGPTAdapter(SiteAdapter):
             pass
         
         # 优化：如果快速路径失败，尝试使用 locator（但减少超时）
+        # 修复：loc.count() 返回 coroutine，需要 await
         try:
             loc = self.page.locator('div[id="prompt-textarea"]').first
-            if await asyncio.wait_for(loc.count() > 0, timeout=0.3):
+            count = await asyncio.wait_for(loc.count(), timeout=0.3)
+            if count > 0:
                 # 不等待 is_visible()，直接返回（如果元素存在，通常就是可见的）
                 self._log("ensure_ready: fast path via prompt-textarea (count check)")
                 return
@@ -405,7 +407,9 @@ class ChatGPTAdapter(SiteAdapter):
             self._log("ensure_ready: fast-path textbox visible")
             return
 
-        total_timeout_s = 60
+        # 优化：减少总超时时间，从 60 秒减少到 30 秒
+        # 如果 30 秒内找不到，立即触发 manual checkpoint，而不是继续等待
+        total_timeout_s = 30  # 从 60 秒减少到 30 秒
         t0 = time.time()
         hb = t0
         check_count = 0
@@ -413,8 +417,8 @@ class ChatGPTAdapter(SiteAdapter):
         last_dismiss_time = t0
 
         while time.time() - t0 < total_timeout_s:
-            # 优化：每 2 秒 dismiss overlays 一次，而不是等到第 3 次检查
-            if time.time() - last_dismiss_time >= 2.0:
+            # 优化：每 1.5 秒 dismiss overlays 一次（从 2 秒减少），加快检查频率
+            if time.time() - last_dismiss_time >= 1.5:  # 从 2.0 秒减少到 1.5 秒
                 await self._dismiss_overlays()
                 last_dismiss_time = time.time()
             
@@ -429,8 +433,9 @@ class ChatGPTAdapter(SiteAdapter):
                 self._log(f"ensure_ready: still locating textbox... (attempt {check_count})")
                 hb = time.time()
 
-            # 优化：前几次快速检查，之后逐渐增加间隔，但最大不超过 0.2 秒
-            sleep_time = 0.1 if check_count < 5 else 0.2  # 从 0.15/0.25 减少到 0.1/0.2，加快检查频率
+            # 优化：前几次快速检查，之后逐渐增加间隔，但最大不超过 0.15 秒
+            # 进一步减少等待时间，加快检查频率
+            sleep_time = 0.08 if check_count < 5 else 0.15  # 从 0.1/0.2 减少到 0.08/0.15，加快检查频率
             await asyncio.sleep(sleep_time)
 
         await self.save_artifacts("ensure_ready_failed")
@@ -755,7 +760,7 @@ class ChatGPTAdapter(SiteAdapter):
         
         # 如果高频轮询失败，尝试并行确认（作为兜底，但减少超时时间）
         self._log("send: high-frequency polling failed, trying parallel confirmation...")
-        if await self._fast_send_confirm(user0, timeout_ms=150):  # 从 200ms 减少到 150ms
+        if await self._fast_send_confirm(user0, timeout_ms=100):  # 从 150ms 减少到 100ms，加快确认
             self._log("send: fast path confirmed (parallel confirmation)")
             return
         
@@ -763,8 +768,8 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 再次高频轮询（最多 0.6 秒，使用相同的多信号检查）
-        for attempt in range(120):  # 0.6 秒 / 0.005 秒 = 120 次（增加轮询次数）
+        # 再次高频轮询（最多 0.4 秒，使用相同的多信号检查，减少等待时间）
+        for attempt in range(80):  # 0.4 秒 / 0.005 秒 = 80 次（从 120 次减少到 80 次，加快确认）
             try:
                 result = await asyncio.wait_for(
                     self.page.evaluate(
@@ -1894,7 +1899,10 @@ class ChatGPTAdapter(SiteAdapter):
             t1 = time.time()
             elapsed = time.time() - ask_start_time
             remaining = timeout_s - elapsed
-            assistant_wait_timeout = min(remaining * 0.4, 90)  # 最多90秒
+            # 优化：减少 assistant_wait_timeout，从 90 秒减少到 15 秒
+            # 这样可以更快地检测到新消息，而不是等待 90 秒
+            # 如果 15 秒内没有检测到，会立即检查文本变化，而不是继续等待
+            assistant_wait_timeout = min(remaining * 0.2, 15)  # 最多15秒（从 90 秒减少到 15 秒）
             n_assist1 = n_assist0
             
             # P1优化：使用高频轮询 + wait_for_function 混合策略
@@ -1936,8 +1944,10 @@ class ChatGPTAdapter(SiteAdapter):
                     # 修复：wait_for_function 的正确调用方式
                     # Playwright 的 wait_for_function 签名：wait_for_function(expression, arg=None, timeout=None)
                     # 注意：arg 和 timeout 都必须作为关键字参数传递
-                    # 优化：减少超时时间，从 assistant_wait_timeout 减少到 min(assistant_wait_timeout, 10) 秒
-                    wait_timeout_ms = int(min(assistant_wait_timeout, 10) * 1000)  # 最多 10 秒（从 15 秒减少）
+                    # 优化：减少超时时间，从 assistant_wait_timeout 减少到 min(assistant_wait_timeout, 5) 秒
+                    # 修复：assistant wait 耗时 102 秒的主要原因是 wait_for_function 超时时间太长（90秒）
+                    # 应该使用更短的超时时间，如果超时就立即检查文本变化，而不是等待 90 秒
+                    wait_timeout_ms = int(min(assistant_wait_timeout, 5) * 1000)  # 最多 5 秒（从 10 秒减少到 5 秒）
                     await self.page.wait_for_function(
                         """(args) => {
                             const n0 = args.n0;
@@ -1952,31 +1962,52 @@ class ChatGPTAdapter(SiteAdapter):
                     n_assist1 = await self._assistant_count()
                     self._log(f"ask: assistant_count increased to {n_assist1} (new message detected via wait_for_function)")
                 except Exception as e:
-                    # wait_for_function 超时或失败，fallback 到快速检查
-                    # 优化：减少 fallback 检查的超时时间
+                    # wait_for_function 超时或失败，立即检查文本变化（而不是等待更长时间）
+                    # 优化：如果 wait_for_function 超时，立即检查文本变化，这样可以更快检测到新消息
+                    self._log(f"ask: wait_for_function timeout or failed ({e}), checking text change immediately...")
                     try:
-                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.8)  # 从 1.0 秒减少到 0.8 秒
+                        # 先快速检查计数
+                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.5)  # 从 0.8 秒减少到 0.5 秒
                         if n_assist1 > n_assist0:
                             self._log(f"ask: assistant_count increased to {n_assist1} (fallback check)")
                         else:
-                            # 如果计数没有增加，尝试检查文本变化
+                            # 如果计数没有增加，立即检查文本变化（这是更可靠的信号）
                             try:
-                                text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.6)  # 从 0.8 秒减少到 0.6 秒
+                                text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.5)  # 从 0.6 秒减少到 0.5 秒
                                 if text_quick and text_quick != last_assist_text_before:
-                                    self._log("ask: text changed, assuming new message")
+                                    self._log("ask: text changed, assuming new message (text change detected)")
                                     n_assist1 = n_assist0 + 1  # 合成值
+                                else:
+                                    # 如果文本也没有变化，再等待一下（最多 2 秒）然后再次检查
+                                    self._log("ask: no text change yet, waiting 2s and re-checking...")
+                                    await asyncio.sleep(2.0)
+                                    # 再次检查文本变化
+                                    try:
+                                        text_retry = await asyncio.wait_for(self._last_assistant_text(), timeout=0.5)
+                                        if text_retry and text_retry != last_assist_text_before:
+                                            self._log("ask: text changed after wait, assuming new message")
+                                            n_assist1 = n_assist0 + 1
+                                        else:
+                                            # 如果还是没有变化，检查计数
+                                            n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=0.5)
+                                            if n_assist1 <= n_assist0:
+                                                n_assist1 = n_assist0  # 保持原值，触发 manual checkpoint
+                                    except Exception:
+                                        n_assist1 = n_assist0  # 保持原值
                             except Exception:
-                                pass
+                                n_assist1 = n_assist0  # 保持原值
                     except Exception:
                         n_assist1 = n_assist0  # 保持原值
                 
-                # 如果仍然没有检测到新消息，触发 manual checkpoint
+                # 如果仍然没有检测到新消息，触发 manual checkpoint（但减少等待时间）
                 if n_assist1 <= n_assist0:
                     await self.save_artifacts("no_assistant_reply")
+                    # 优化：减少 manual checkpoint 的等待时间，从 60 秒减少到 30 秒
+                    # 这样可以更快地检测到新消息，而不是等待 60 秒
                     await self.manual_checkpoint(
                         "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
                         ready_check=self._ready_check_textbox,
-                        max_wait_s=min(60, timeout_s - elapsed - 5),
+                        max_wait_s=min(30, timeout_s - elapsed - 5),  # 从 60 秒减少到 30 秒
                     )
                     # manual_checkpoint 后再次检查
                     try:
