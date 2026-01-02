@@ -377,24 +377,87 @@ async def run_automation(
             print(f"[{beijing_now_iso()}] [automation] ✗ 未提供 driver_url，跳过 LLM 分析")
             return
         
-        print(f"[{beijing_now_iso()}] [automation] 发送到 {arbitrator_site} 进行分析...")
+        # 检查 driver_server 健康状态
+        try:
+            from .driver_client import health
+            health_result = await asyncio.to_thread(health, driver_url)
+            if not health_result.get("ok"):
+                print(f"[{beijing_now_iso()}] [automation] ⚠ 警告: driver_server 健康检查失败: {health_result.get('error', 'unknown')}")
+        except Exception as health_err:
+            print(f"[{beijing_now_iso()}] [automation] ⚠ 警告: 无法连接到 driver_server ({driver_url}): {health_err}")
+            print(f"[{beijing_now_iso()}] [automation] 提示: 请确保 driver_server 正在运行")
+            print(f"[{beijing_now_iso()}] [automation] 启动命令: python start_driver.py --brief ./brief.yaml")
         
-        payload = await asyncio.to_thread(
-            driver_run_task,
-            driver_url,
-            arbitrator_site,
-            prompt,
-            task_timeout_s,
-            model_version,  # 传递模型版本参数
-        )
+        print(f"[{beijing_now_iso()}] [automation] 发送到 {arbitrator_site} 进行分析 (model_version={model_version}, timeout={task_timeout_s}s)...")
+        
+        try:
+            payload = await asyncio.to_thread(
+                driver_run_task,
+                driver_url,
+                arbitrator_site,
+                prompt,
+                task_timeout_s,
+                model_version,  # 传递模型版本参数
+            )
+        except Exception as e:
+            error_msg = str(e)
+            if "502" in error_msg or "Bad Gateway" in error_msg:
+                raise RuntimeError(
+                    f"LLM 分析失败: driver_server 返回 502 Bad Gateway\n"
+                    f"可能原因：\n"
+                    f"  1. driver_server 未运行或已崩溃\n"
+                    f"  2. driver_server 处理请求时出错\n"
+                    f"  3. 网络连接问题\n"
+                    f"解决方案：\n"
+                    f"  1. 检查 driver_server 是否运行: curl {driver_url}/health\n"
+                    f"  2. 重启 driver_server: python start_driver.py --brief ./brief.yaml\n"
+                    f"  3. 查看 driver_server 日志: logs/driver_*.log\n"
+                    f"原始错误: {error_msg}"
+                )
+            else:
+                raise RuntimeError(f"LLM 分析失败 (site={arbitrator_site}): {error_msg}")
         
         ok = bool(payload.get("ok"))
         answer = payload.get("answer") or ""
         url = payload.get("url") or ""
         err = payload.get("error")
+        http_status = payload.get("http_status")
         
         if not ok:
-            raise RuntimeError(f"LLM 分析失败 (site={arbitrator_site}): {err}")
+            error_details = []
+            if http_status:
+                error_details.append(f"HTTP 状态码: {http_status}")
+            if err:
+                error_details.append(f"错误信息: {err}")
+            
+            error_msg = f"LLM 分析失败 (site={arbitrator_site})"
+            if error_details:
+                error_msg += "\n" + "\n".join(error_details)
+            
+            # 针对常见错误提供解决方案
+            if http_status == 502:
+                error_msg += (
+                    f"\n\n可能原因：\n"
+                    f"  1. driver_server 未运行或已崩溃\n"
+                    f"  2. driver_server 处理请求时出错\n"
+                    f"  3. 网络连接问题\n"
+                    f"解决方案：\n"
+                    f"  1. 检查 driver_server 是否运行: curl {driver_url}/health\n"
+                    f"  2. 重启 driver_server: python start_driver.py --brief ./brief.yaml\n"
+                    f"  3. 查看 driver_server 日志: logs/driver_*.log"
+                )
+            elif http_status == 503:
+                error_msg += (
+                    f"\n\n可能原因：\n"
+                    f"  1. driver_server 正在初始化站点\n"
+                    f"  2. 站点需要手动登录/验证\n"
+                    f"解决方案：\n"
+                    f"  1. 等待几秒后重试\n"
+                    f"  2. 检查 driver_server 日志\n"
+                    f"  3. 如果提示需要登录，请手动完成登录后重试"
+                )
+            
+            raise RuntimeError(error_msg)
         
         print(f"[{beijing_now_iso()}] [automation] ✓ LLM 分析完成")
         
