@@ -1011,11 +1011,9 @@ class ChatGPTAdapter(SiteAdapter):
                                     el.value = fullText;
                                 }}
                                 
-                                // 关键：按顺序触发所有状态更新事件
+                                // 触发输入状态更新事件（避免 beforeinput/data 导致重复插入）
                                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                el.dispatchEvent(new InputEvent('beforeinput', {{ bubbles: true, inputType: 'insertText', data: fullText }}));
-                                el.dispatchEvent(new KeyboardEvent('keydown', {{ bubbles: true, key: 'Enter' }}));
                                 el.blur(); // 有时失焦能强制同步状态
                                 el.focus(); // 重新聚焦，确保按钮状态更新
                             }}
@@ -1120,22 +1118,25 @@ class ChatGPTAdapter(SiteAdapter):
                                 self._log(f"send: browser/page closed during _tb_set_text, raising error")
                                 raise RuntimeError(f"Browser/page closed during _tb_set_text: {set_text_err}") from set_text_err
                             
-                            # 如果 _tb_set_text 失败，检查元素类型
-                            # 修复：对于 contenteditable（ProseMirror），不要使用 type()，而是使用 JS 注入
+                            # 如果 _tb_set_text 失败，优先重试 JS 注入；仅 textarea 允许 type()
                             err_msg = str(set_text_err) if set_text_err else "timeout or unknown error"
                             try:
                                 tb_kind = await self._tb_kind(tb)
-                                if tb_kind == "contenteditable":
-                                    # 对于 contenteditable，强制使用 JS 注入，避免 type() 导致的字符错乱
-                                    self._log(f"send: _tb_set_text failed ({err_msg}), but detected contenteditable, using JS injection instead of type()...")
-                                    use_js_inject = True  # 强制使用 JS 注入
-                                    # 重新进入 JS 注入逻辑
-                                    continue  # 跳出当前逻辑，重新进入 JS 注入分支
                             except Exception:
-                                # 检测失败，继续原有逻辑
-                                pass
-                            
-                            self._log(f"send: _tb_set_text failed ({err_msg}), trying type()...")
+                                tb_kind = "unknown"
+
+                            # 修复：对于非 textarea（包括 contenteditable 和 unknown），都使用 JS 注入，避免 type() 失败
+                            # 因为 ChatGPT 使用 ProseMirror（contenteditable），即使检测失败（返回 unknown），也不应该使用 type()
+                            if tb_kind != "textarea":
+                                self._log(
+                                    f"send: _tb_set_text failed ({err_msg}), detected {tb_kind}, using JS injection instead of type()..."
+                                )
+                                use_js_inject = True
+                                await asyncio.sleep(0.2)
+                                continue
+
+                            # 只有确认是 textarea 时才使用 type()
+                            self._log(f"send: _tb_set_text failed ({err_msg}), confirmed textarea, trying type()...")
                             
                             # 修复：_tb_set_text 可能部分成功（输入了一部分内容），需要先清空，避免重复输入
                             try:

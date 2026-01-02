@@ -490,7 +490,10 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             return await tb.evaluate("""(el) => {
                 const tag = (el.tagName || '').toLowerCase();
                 if (tag === 'textarea' || tag === 'input') return 'textarea';
-                if (el.isContentEditable) return 'contenteditable';
+                // 修复：检查多种 contenteditable 属性，确保能正确检测
+                if (el.isContentEditable || el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                    return 'contenteditable';
+                }
                 return 'unknown';
             }""")
         except Exception as e:
@@ -600,7 +603,6 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                             // 触发所有必要的事件
                             el.dispatchEvent(new Event('input', {bubbles:true}));
                             el.dispatchEvent(new Event('change', {bubbles:true}));
-                            el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType: 'insertText', data: t}));
                             // 强制更新（ProseMirror 可能需要）
                             if (el.dispatchEvent) {
                                 el.dispatchEvent(new Event('compositionupdate', {bubbles:true}));
@@ -665,7 +667,6 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                     // 触发所有必要的事件（ProseMirror 兼容）
                     el.dispatchEvent(new Event('input', {bubbles:true}));
                     el.dispatchEvent(new Event('change', {bubbles:true}));
-                    el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType: 'insertText', data: t}));
                     // 强制更新（ProseMirror 可能需要）
                     if (el.dispatchEvent) {
                         el.dispatchEvent(new Event('compositionupdate', {bubbles:true}));
