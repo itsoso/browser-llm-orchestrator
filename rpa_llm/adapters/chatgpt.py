@@ -676,8 +676,8 @@ class ChatGPTAdapter(SiteAdapter):
         # 这样可以更快地检测到发送成功，避免长时间等待
         combined_user_sel = ", ".join(self.USER_MSG)
         
-        # 高频轮询检查（每 0.03 秒检查一次，最多 1.5 秒）
-        max_attempts = 50  # 1.5 秒 / 0.03 秒 = 50 次
+        # 高频轮询检查（每 0.02 秒检查一次，最多 1.2 秒）
+        max_attempts = 60  # 1.2 秒 / 0.02 秒 = 60 次
         for attempt in range(max_attempts):
             try:
                 # 并行检查多个信号：user_count, textbox cleared, stop button
@@ -688,18 +688,18 @@ class ChatGPTAdapter(SiteAdapter):
                             const userSel = args.userSel;
                             const user0 = args.user0;
                             
-                            // 检查 1: user_count 增加
+                            // 检查 1: user_count 增加（最可靠的信号）
                             const userCount = document.querySelectorAll(userSel).length;
                             if (userCount > user0) return {signal: 'user_count', value: userCount};
                             
-                            // 检查 2: textbox 清空
+                            // 检查 2: textbox 清空（快速信号）
                             const textbox = document.querySelector('#prompt-textarea');
                             if (textbox) {
                                 const text = (textbox.innerText || textbox.textContent || '').trim();
                                 if (text.length === 0) return {signal: 'textbox_cleared', value: true};
                             }
                             
-                            // 检查 3: stop button 出现
+                            // 检查 3: stop button 出现（快速信号）
                             const stopBtns = document.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="停止"]');
                             for (let btn of stopBtns) {
                                 if (btn.offsetParent !== null) return {signal: 'stop_button', value: true};
@@ -709,7 +709,7 @@ class ChatGPTAdapter(SiteAdapter):
                         }""",
                         {"userSel": combined_user_sel, "user0": user0}
                     ),
-                    timeout=0.08  # 每次检查最多 0.08 秒
+                    timeout=0.05  # 每次检查最多 0.05 秒（从 0.08 秒减少）
                 )
                 
                 if isinstance(result, dict) and result.get("signal") != "none":
@@ -725,12 +725,12 @@ class ChatGPTAdapter(SiteAdapter):
             except (asyncio.TimeoutError, Exception):
                 pass
             
-            # 每 0.03 秒检查一次（从 0.05 秒减少到 0.03 秒）
-            await asyncio.sleep(0.03)
+            # 每 0.02 秒检查一次（从 0.03 秒减少到 0.02 秒）
+            await asyncio.sleep(0.02)
         
         # 如果高频轮询失败，尝试并行确认（作为兜底，但减少超时时间）
         self._log("send: high-frequency polling failed, trying parallel confirmation...")
-        if await self._fast_send_confirm(user0, timeout_ms=400):  # 从 500ms 减少到 400ms
+        if await self._fast_send_confirm(user0, timeout_ms=300):  # 从 400ms 减少到 300ms
             self._log("send: fast path confirmed (parallel confirmation)")
             return
         
@@ -738,8 +738,8 @@ class ChatGPTAdapter(SiteAdapter):
         self._log("send: first Control+Enter not confirmed, trying again...")
         await self.page.keyboard.press("Control+Enter")
         
-        # 再次高频轮询（最多 1 秒，使用相同的多信号检查）
-        for attempt in range(33):  # 1 秒 / 0.03 秒 = 33 次
+        # 再次高频轮询（最多 0.8 秒，使用相同的多信号检查）
+        for attempt in range(40):  # 0.8 秒 / 0.02 秒 = 40 次
             try:
                 result = await asyncio.wait_for(
                     self.page.evaluate(
@@ -747,18 +747,18 @@ class ChatGPTAdapter(SiteAdapter):
                             const userSel = args.userSel;
                             const user0 = args.user0;
                             
-                            // 检查 1: user_count 增加
+                            // 检查 1: user_count 增加（最可靠的信号）
                             const userCount = document.querySelectorAll(userSel).length;
                             if (userCount > user0) return {signal: 'user_count', value: userCount};
                             
-                            // 检查 2: textbox 清空
+                            // 检查 2: textbox 清空（快速信号）
                             const textbox = document.querySelector('#prompt-textarea');
                             if (textbox) {
                                 const text = (textbox.innerText || textbox.textContent || '').trim();
                                 if (text.length === 0) return {signal: 'textbox_cleared', value: true};
                             }
                             
-                            // 检查 3: stop button 出现
+                            // 检查 3: stop button 出现（快速信号）
                             const stopBtns = document.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="停止"]');
                             for (let btn of stopBtns) {
                                 if (btn.offsetParent !== null) return {signal: 'stop_button', value: true};
@@ -768,7 +768,7 @@ class ChatGPTAdapter(SiteAdapter):
                         }""",
                         {"userSel": combined_user_sel, "user0": user0}
                     ),
-                    timeout=0.08
+                    timeout=0.05  # 从 0.08 秒减少到 0.05 秒
                 )
                 
                 if isinstance(result, dict) and result.get("signal") != "none":
@@ -784,7 +784,7 @@ class ChatGPTAdapter(SiteAdapter):
             except (asyncio.TimeoutError, Exception):
                 pass
             
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.02)  # 从 0.03 秒减少到 0.02 秒
         
         # 如果还是失败，抛出异常（让上层处理）
         raise RuntimeError("send not accepted after 2 Control+Enter attempts")
@@ -1544,10 +1544,10 @@ class ChatGPTAdapter(SiteAdapter):
             # 先尝试高频轮询（更快），如果失败再使用 wait_for_function（更可靠）
             combined_sel = ", ".join(self.ASSISTANT_MSG)
             
-            # 优化：先尝试高频轮询（最多 3 秒），这样可以更快检测到新消息
+            # 优化：先尝试高频轮询（最多 2 秒），这样可以更快检测到新消息
             n_assist1 = n_assist0
             polling_success = False
-            for attempt in range(60):  # 3 秒 / 0.05 秒 = 60 次
+            for attempt in range(50):  # 2 秒 / 0.04 秒 = 50 次
                 try:
                     current_count = await asyncio.wait_for(
                         self.page.evaluate(
@@ -1556,7 +1556,7 @@ class ChatGPTAdapter(SiteAdapter):
                             }""",
                             combined_sel
                         ),
-                        timeout=0.05  # 每次检查最多 0.05 秒
+                        timeout=0.03  # 每次检查最多 0.03 秒（从 0.05 秒减少）
                     )
                     if isinstance(current_count, int) and current_count > n_assist0:
                         n_assist1 = current_count
@@ -1566,7 +1566,7 @@ class ChatGPTAdapter(SiteAdapter):
                 except (asyncio.TimeoutError, Exception):
                     pass
                 
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.04)  # 从 0.05 秒减少到 0.04 秒
             
             # 如果高频轮询失败，使用 wait_for_function（事件驱动，更可靠）
             if not polling_success:
@@ -1628,7 +1628,8 @@ class ChatGPTAdapter(SiteAdapter):
             # 因为 n_assist1 可能是合成值（n_assist0 + 1），而实际可能有更多新消息
             # 这样可以确保 target_index 指向实际的最新消息，而不是过时的索引
             try:
-                n_assist1_actual = await asyncio.wait_for(self._assistant_count(), timeout=2.0)
+                # 优化：减少超时时间，加快检测
+                n_assist1_actual = await asyncio.wait_for(self._assistant_count(), timeout=1.0)  # 从 2.0 秒减少到 1.0 秒
                 if n_assist1_actual > n_assist0:
                     # 如果实际计数大于 n_assist0，使用实际计数
                     n_assist1 = n_assist1_actual
@@ -1642,7 +1643,8 @@ class ChatGPTAdapter(SiteAdapter):
                     self._log(f"ask: no new messages detected, using actual count: {n_assist1}")
             except Exception as e:
                 # 重新查询失败，使用现有的 n_assist1（可能是合成值）
-                self._log(f"ask: re-query assistant_count failed ({e}), using existing n_assist1={n_assist1}")
+                # 优化：不记录错误日志，避免噪音（这是正常的 fallback 情况）
+                pass  # 静默失败，使用现有的 n_assist1
 
             # 优化：等待新消息的文本内容出现（使用索引定位而不是 last != before）
             # 当 assistant_count(after)=k 时，读取第 k-1 条 assistant 消息（0-index）
