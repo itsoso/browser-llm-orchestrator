@@ -1124,40 +1124,32 @@ class ChatGPTAdapter(SiteAdapter):
         send_phase_start = time.time()
         send_phase_max_s = float(os.environ.get("CHATGPT_SEND_PHASE_MAX_S", "8.0"))
 
+        # 优化：提取辅助方法，减少重复代码
+        async def check_if_sent(method_name: str) -> bool:
+            """检查是否已经发送成功"""
+            try:
+                user_count_now = await self._user_count()
+                if user_count_now > user_count_before_send:
+                    self._log(f"send: confirmed sent via {method_name} (user_count={user_count_now})")
+                    return True
+            except Exception:
+                pass
+            return False
+
         # 步骤 1: 尝试 Enter (最快)
         try:
             await tb.press("Enter", timeout=3000)
             self._log("send: Enter pressed")
-            # Enter 后立即检查是否发送成功
             await asyncio.sleep(0.3)
-            try:
-                user_count_after_enter = await self._user_count()
-                if user_count_after_enter > user_count_before_send:
-                    self._log(f"send: confirmed sent via Enter (user_count={user_count_after_enter})")
-                    return  # 已发送，不需要继续
-            except Exception:
-                pass
+            if await check_if_sent("Enter"):
+                return
         except Exception:
             pass
 
-        # 给一点反应时间，如果 Enter 生效了，页面会刷新，下面的逻辑其实无害
+        # 给一点反应时间，如果 Enter 生效了，页面会刷新
         await asyncio.sleep(0.5)
-
-        # 再次检查是否已经发送（Enter 可能已经生效）
-        try:
-            user_count_check = await self._user_count()
-            if user_count_check > user_count_before_send:
-                self._log(f"send: confirmed sent after Enter (user_count={user_count_check}), skipping button attempts")
-                return  # 已发送，不需要继续
-        except Exception:
-            pass
-        try:
-            user_count_check = await self._user_count()
-            if user_count_check > user_count_before_send:
-                self._log(f"send: already sent after Enter (user_count={user_count_check}), skipping further send attempts")
-                return  # 已经发送了，不需要继续
-        except Exception:
-            pass
+        if await check_if_sent("Enter (after wait)"):
+            return
 
         # 步骤 2: 尝试 Control+Enter (日志证明这是救世主)
         # 很多时候 Enter 只是换行，Ctrl+Enter 才是强制提交
@@ -1166,36 +1158,20 @@ class ChatGPTAdapter(SiteAdapter):
             await tb.press("Control+Enter", timeout=3000)
             await asyncio.sleep(0.3)
             self._log("send: Control+Enter pressed")
-            # Control+Enter 后立即检查是否发送成功
-            try:
-                user_count_after_ctrl_enter = await self._user_count()
-                if user_count_after_ctrl_enter > user_count_before_send:
-                    self._log(f"send: confirmed sent via Control+Enter (user_count={user_count_after_ctrl_enter})")
-                    return  # 已发送，不需要继续
-            except Exception:
-                pass
+            if await check_if_sent("Control+Enter"):
+                return
         except Exception:
             pass
 
         # 再次检查是否已经发送（Control+Enter 可能已经生效）
         await asyncio.sleep(0.5)
-        try:
-            user_count_check2 = await self._user_count()
-            if user_count_check2 > user_count_before_send:
-                self._log(f"send: already sent after Control+Enter (user_count={user_count_check2}), skipping button click")
-                return  # 已经发送了，不需要继续
-        except Exception:
-            pass
+        if await check_if_sent("Control+Enter (after wait)"):
+            return
 
         if time.time() - send_phase_start >= send_phase_max_s:
-            # 优化：在跳过按钮前，最后检查一次是否已经发送
-            try:
-                user_count_final = await self._user_count()
-                if user_count_final > user_count_before_send:
-                    self._log(f"send: confirmed sent before skipping buttons (user_count={user_count_final}), skipping button attempts")
-                    return  # 已发送，不需要继续
-            except Exception:
-                pass
+            # 在跳过按钮前，最后检查一次是否已经发送
+            if await check_if_sent("before skipping buttons"):
+                return
             self._log(
                 f"send: send phase reached {send_phase_max_s:.1f}s, skipping button attempts to reduce latency"
             )
@@ -1219,13 +1195,7 @@ class ChatGPTAdapter(SiteAdapter):
                     self._log(f"send: clicked send button {send_sel}")
                     # 按钮点击后也检查是否发送成功
                     await asyncio.sleep(0.3)
-                    try:
-                        user_count_after_btn = await self._user_count()
-                        if user_count_after_btn > user_count_before_send:
-                            self._log(f"send: confirmed sent via button (user_count={user_count_after_btn})")
-                            return
-                    except Exception:
-                        pass
+                    if await check_if_sent(f"button ({send_sel})"):
                         return
             except Exception:
                 continue
@@ -1294,124 +1264,150 @@ class ChatGPTAdapter(SiteAdapter):
             await self._send_prompt(prompt)
             self._log(f"ask: send phase done ({time.time()-t_send:.2f}s)")
 
-            # 优化：确认 user 消息出现（证明发送成功）
-            # 策略：最多等待 3 秒，只做轻判定（stop/textbox cleared），失败不 manual checkpoint，直接进入等待 assistant
-            # 本质上是冗余的：真正想要的是"新 assistant 回复来了"，所以 confirm 融合进"等待 assistant 回复"
-            self._log("ask: confirming user message appeared (light check, max 2s)...")
-            t_confirm = time.time()
-            confirm_reason = ""
-            # 优化：缩短确认超时到 2 秒，失败不 manual checkpoint
-            user_wait_timeout = min(2.0, max(0.5, remaining - 5))  # 最多等待 2 秒，最少 0.5 秒
-            user_confirmed = False
-            # 优化：轻量确认（最多 2 秒，只做 stop/textbox cleared 的轻判定）
-            # 快速路径 A：出现 Stop generating（最可靠的信号）
-            # 修复：使用并行检查，减少等待时间
-            if not user_confirmed:
-                try:
-                    if len(self.STOP_BTN) > 0:
-                        # 修复：使用并行检查，只检查第一个选择器，超时时间更短
-                        try:
-                            await asyncio.wait_for(
-                                self.page.wait_for_selector(self.STOP_BTN[0], state="visible", timeout=500),
-                                timeout=0.6  # 总超时 0.6 秒
-                            )
-                            user_confirmed = True
-                            confirm_reason = "stop_button_visible"
-                            self._log("ask: fast confirm via stop button")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            
-            # 快速路径 B：输入框清空（轻量检查）
-            # 修复：减少检查次数和间隔，加快确认速度
-            if not user_confirmed:
-                try:
-                    tb_loc = self.page.locator('div[id="prompt-textarea"]').first
-                    if await tb_loc.count() > 0:
-                        # 只检查 1 次，快速确认
-                        try:
-                            text_now = await asyncio.wait_for(self._tb_get_text(tb_loc), timeout=0.3)
-                            if text_now is not None and text_now.strip() == "":
-                                user_confirmed = True
-                                confirm_reason = "textbox_cleared"
-                                self._log("ask: fast confirm via textbox cleared")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            
-            # 优化：如果仍未确认，不触发 manual checkpoint，直接进入等待 assistant
-            # 因为即使确认失败，assistant 可能已经在回复了
-            if not user_confirmed:
-                self._log("ask: user message not confirmed within 3s, proceeding to wait for assistant (may already be responding)")
-                confirm_reason = "timeout_proceed"
-            if confirm_reason:
-                self._log(f"ask: confirm reason={confirm_reason}")
-            confirm_duration = time.time() - t_confirm
-            self._log(f"ask: confirm phase done ({confirm_duration:.2f}s)")
-            
-            # 优化：如果确认阶段超过 3 秒，记录警告
-            if confirm_duration > 3.0:
-                self._log(f"ask: warning - confirm phase took {confirm_duration:.2f}s (expected <3s)")
-
-            # 等待 assistant 消息出现（计数增加）
-            self._log("ask: waiting for assistant message...")
+            # 优化：移除冗余的 confirm phase，直接进入等待 assistant 消息
+            # 策略：通过 assistant_count 增加或内容变动来反向推断发送成功
+            # 实现"信号竞争"机制：同时监听多个信号（assistant_count、stop button、textbox cleared），谁先到就算谁
+            self._log("ask: waiting for assistant message (using signal race confirmation)...")
             t1 = time.time()
             hb = t1
             elapsed = time.time() - ask_start_time
             remaining = timeout_s - elapsed
             assist_timeout_streak = 0
-            # 优化：从180秒减少到120秒，先快速检查一次assistant_count
+            # 优化：快速检查一次，确定超时时间
             try:
-                n_assist_quick_check = await asyncio.wait_for(self._assistant_count(), timeout=0.8)  # 减少到 0.8 秒
+                n_assist_quick_check = await asyncio.wait_for(self._assistant_count(), timeout=0.8)
                 if n_assist_quick_check > n_assist0:
-                    # 如果已检测到新消息，减少超时时间
-                    assistant_wait_timeout = min(remaining * 0.3, 40)  # 最多40秒（从60秒减少）
+                    assistant_wait_timeout = min(remaining * 0.3, 40)  # 最多40秒
                 else:
-                    assistant_wait_timeout = min(remaining * 0.4, 90)  # 最多90秒（从120秒减少）
+                    assistant_wait_timeout = min(remaining * 0.4, 90)  # 最多90秒
             except Exception:
-                # 快速检查失败，使用默认值
-                assistant_wait_timeout = min(remaining * 0.4, 90)  # 最多90秒（从120秒减少）
-            n_assist1 = n_assist0  # 初始化，确保在循环外也能访问
+                assistant_wait_timeout = min(remaining * 0.4, 90)
             
+            n_assist1 = n_assist0  # 初始化
+            send_confirmed = False  # 标记是否已确认发送成功
+            
+            # 优化：实现"信号竞争"机制，同时监听多个信号，谁先到就算谁
             while time.time() - t1 < assistant_wait_timeout:
                 elapsed = time.time() - ask_start_time
-                if elapsed >= timeout_s - 30:  # 留30秒给后续阶段
+                if elapsed >= timeout_s - 30:
                     self._log(f"ask: timeout approaching (elapsed={elapsed:.1f}s/{timeout_s}s), breaking assistant wait")
                     break
+                
+                # 优化：并行检查多个信号，实现"信号竞争"机制
+                async def check_assistant_count():
+                    try:
+                        return await asyncio.wait_for(self._assistant_count(), timeout=1.0)
+                    except (asyncio.TimeoutError, Exception):
+                        return None
+                
+                async def check_stop_button():
+                    try:
+                        if await self._is_generating():
+                            return "stop_visible"
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    return None
+                
+                async def check_textbox_cleared():
+                    try:
+                        tb_loc = self.page.locator('div[id="prompt-textarea"]').first
+                        if await tb_loc.count() > 0:
+                            text_now = await asyncio.wait_for(self._tb_get_text(tb_loc), timeout=0.3)
+                            if text_now is not None and text_now.strip() == "":
+                                return "textbox_cleared"
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    return None
+                
+                async def check_text_change():
+                    try:
+                        text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.6)
+                        if text_quick and text_quick != last_assist_text_before:
+                            return "text_changed"
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    return None
+                
+                # 并行执行所有检查
                 try:
-                    # 修复：减少超时时间，加快检测速度
-                    n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=1.2)  # 从 1.5 减少到 1.2
-                    if n_assist1 > n_assist0:
-                        self._log(f"ask: assistant_count(after)={n_assist1} (new message)")
-                        break
-                except asyncio.TimeoutError:
-                    assist_timeout_streak += 1
-                    # 修复：减少日志输出频率，避免过多日志
-                    if assist_timeout_streak % 4 == 0:  # 从 3 增加到 4
-                        self._log("ask: assistant_count() timeout, retrying...")
-                except Exception as e:
-                    assist_timeout_streak += 1
-                    if assist_timeout_streak % 4 == 0:  # 从 3 增加到 4
-                        self._log(f"ask: assistant_count() error: {e}")
+                    results = await asyncio.wait_for(
+                        asyncio.gather(
+                            check_assistant_count(),
+                            check_stop_button(),
+                            check_textbox_cleared(),
+                            check_text_change(),
+                            return_exceptions=True
+                        ),
+                        timeout=1.2  # 总超时 1.2 秒
+                    )
                     
+                    # 检查 assistant_count（最可靠的信号）
+                    if results[0] is not None and isinstance(results[0], int):
+                        n_assist1 = results[0]
+                        if n_assist1 > n_assist0:
+                            self._log(f"ask: assistant_count(after)={n_assist1} (new message, signal: assistant_count)")
+                            send_confirmed = True
+                            break
+                    
+                    # 检查其他信号（stop button、textbox cleared、text change）
+                    for i, result in enumerate(results[1:], 1):
+                        if isinstance(result, str) and result:
+                            signal_names = ["stop_button", "textbox_cleared", "text_change"]
+                            self._log(f"ask: send confirmed via {signal_names[i-1]} (signal: {result})")
+                            send_confirmed = True
+                            # 如果检测到 stop button 或 textbox cleared，也尝试获取 assistant_count
+                            if i <= 2:  # stop_button 或 textbox_cleared
+                                try:
+                                    n_assist1_check = await asyncio.wait_for(self._assistant_count(), timeout=0.8)
+                                    if n_assist1_check > n_assist0:
+                                        n_assist1 = n_assist1_check
+                                        self._log(f"ask: assistant_count also increased to {n_assist1}")
+                                        break
+                                except Exception:
+                                    pass
+                            break
+                except (asyncio.TimeoutError, Exception):
+                    assist_timeout_streak += 1
+                    # 如果并行检查超时，降级为顺序检查
+                    try:
+                        n_assist1 = await asyncio.wait_for(self._assistant_count(), timeout=1.0)
+                        if n_assist1 > n_assist0:
+                            self._log(f"ask: assistant_count(after)={n_assist1} (new message)")
+                            send_confirmed = True
+                            break
+                    except (asyncio.TimeoutError, Exception):
+                        assist_timeout_streak += 1
+                        if assist_timeout_streak % 4 == 0:
+                            self._log("ask: assistant_count() timeout, retrying...")
+                
+                # 超时过多，降级为文本变化检测
+                if assist_timeout_streak >= 2 and not send_confirmed:
+                    try:
+                        text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.8)
+                        if text_quick and text_quick != last_assist_text_before:
+                            self._log("ask: assistant_count timeout streak, using text change as signal")
+                            # 修复 Bug 1: 重新查询实际的 assistant_count
+                            try:
+                                n_assist1_actual = await asyncio.wait_for(self._assistant_count(), timeout=1.5)
+                                if n_assist1_actual > n_assist0:
+                                    n_assist1 = n_assist1_actual
+                                    self._log(f"ask: re-queried assistant_count after timeout streak: {n_assist1} (actual)")
+                                else:
+                                    n_assist1 = n_assist0 + 1
+                                    self._log(f"ask: re-query failed, using synthetic count: {n_assist1}")
+                            except Exception:
+                                n_assist1 = n_assist0 + 1
+                                self._log(f"ask: re-query failed, using synthetic count: {n_assist1} (warning: may be inaccurate)")
+                            send_confirmed = True
+                            break
+                    except Exception:
+                        pass
+                
                 if time.time() - hb >= 10:
                     elapsed = time.time() - ask_start_time
                     self._log(f"ask: still waiting assistant message... (elapsed={elapsed:.1f}s/{timeout_s}s)")
                     hb = time.time()
-                # 超时过多，降级为文本变化检测以减少等待
-                # 修复：减少超时阈值，从 3 次减少到 2 次
-                if assist_timeout_streak >= 2:
-                    try:
-                        text_quick = await asyncio.wait_for(self._last_assistant_text(), timeout=0.8)  # 减少到 0.8 秒
-                        if text_quick and text_quick != last_assist_text_before:
-                            self._log("ask: assistant_count timeout streak, using text change as signal")
-                            n_assist1 = n_assist0 + 1
-                            break
-                    except Exception:
-                        pass
-                # 修复：减少循环间隔，从 0.4 秒减少到 0.3 秒
+                
                 await asyncio.sleep(0.3)
             else:
                 await self.save_artifacts("no_assistant_reply")
@@ -1421,6 +1417,26 @@ class ChatGPTAdapter(SiteAdapter):
                     max_wait_s=min(60, timeout_s - elapsed - 5),
                 )
             self._log(f"ask: assistant wait done ({time.time()-t1:.2f}s)")
+
+            # 修复 Bug 1: 在使用 n_assist1 计算 target_index 之前，重新查询实际的 assistant_count
+            # 因为 n_assist1 可能是合成值（n_assist0 + 1），而实际可能有更多新消息
+            # 这样可以确保 target_index 指向实际的最新消息，而不是过时的索引
+            try:
+                n_assist1_actual = await asyncio.wait_for(self._assistant_count(), timeout=2.0)
+                if n_assist1_actual > n_assist0:
+                    # 如果实际计数大于 n_assist0，使用实际计数
+                    n_assist1 = n_assist1_actual
+                    self._log(f"ask: using actual assistant_count for target_index: {n_assist1} (was {n_assist1} before re-query)")
+                elif n_assist1 > n_assist0:
+                    # 如果实际计数没有增加，但 n_assist1 已经 > n_assist0（可能是合成值），保持使用 n_assist1
+                    self._log(f"ask: actual count unchanged ({n_assist1_actual}), keeping n_assist1={n_assist1}")
+                else:
+                    # 如果实际计数和 n_assist1 都没有增加，使用实际计数
+                    n_assist1 = n_assist1_actual
+                    self._log(f"ask: no new messages detected, using actual count: {n_assist1}")
+            except Exception as e:
+                # 重新查询失败，使用现有的 n_assist1（可能是合成值）
+                self._log(f"ask: re-query assistant_count failed ({e}), using existing n_assist1={n_assist1}")
 
             # 优化：等待新消息的文本内容出现（使用索引定位而不是 last != before）
             # 当 assistant_count(after)=k 时，读取第 k-1 条 assistant 消息（0-index）
@@ -1439,6 +1455,7 @@ class ChatGPTAdapter(SiteAdapter):
             
             # 优化：使用索引定位，当 assistant_count(after)=k 时，读取第 k-1 条消息（0-index）
             # 这样可以避免读到空文本或旧节点
+            # 修复 Bug 1: 现在 n_assist1 已经是最新的实际计数，可以安全地计算 target_index
             target_index = n_assist1 - 1  # 最后一条消息的索引（0-index）
             if target_index >= 0:
                 # 快速路径：先快速检查一次，如果已经有新内容，直接跳过

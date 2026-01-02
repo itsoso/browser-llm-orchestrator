@@ -286,23 +286,25 @@ class GrokAdapter(SiteAdapter):
         tb, frame, how = await self._find_textbox_any_frame()
         self._log(f"send: textbox via {how} frame={frame.url}")
 
-        # 用 type(delay) 触发真实键盘事件
+        # 优化：使用统一的 textbox 操作方法
         # 最终验证：确保 prompt 中没有任何换行符（双重保险）
         prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"ask: {msg}"))
         
-        await tb.click()
+        # 清空输入框
+        await self._tb_clear(tb)
+        await asyncio.sleep(0.1)
+        
+        # 设置文本（使用统一的抽象方法）
         try:
-            await tb.fill("")
-            await tb.type(prompt, delay=5)
-            # type() 完成后立即检查是否已经发送
+            await self._tb_set_text(tb, prompt)
             await asyncio.sleep(0.2)
-            try:
-                textbox_after = await asyncio.wait_for(tb.inner_text(), timeout=2) or ""
-                if not textbox_after.strip() or len(textbox_after.strip()) < len(prompt) * 0.1:
-                    self._log(f"ask: warning - prompt may have been sent during type() (textbox empty or nearly empty)")
-            except Exception:
-                pass
-        except Exception:
+            # 验证输入内容
+            textbox_after = await self._tb_get_text(tb)
+            if not textbox_after.strip() or len(textbox_after.strip()) < len(prompt) * 0.1:
+                self._log(f"ask: warning - prompt may have been sent during input (textbox empty or nearly empty)")
+        except Exception as e:
+            self._log(f"ask: _tb_set_text failed: {e}, trying fallback...")
+            # Fallback: 直接使用 fill
             await tb.fill(prompt)
 
         await self._arm_input_events(tb)

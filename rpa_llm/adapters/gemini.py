@@ -347,101 +347,166 @@ class GeminiAdapter(SiteAdapter):
             pass
 
     async def _tb_set_text(self, tb: Locator, text: str) -> None:
-        # 修复：Gemini 使用 contenteditable div（Quill 编辑器），type() 在 contenteditable 上可能很慢且不稳定
-        # 对于 contenteditable，直接使用 JS 注入，而不是 type()
+        # 修复：Gemini 始终使用 contenteditable div（Quill 编辑器），永远不要使用 type()
+        # 强制使用 JS 注入，避免误判为 textarea 导致 type() 超时
         await tb.focus(timeout=4000)
 
-        # 检测元素类型（修复：更可靠的检测方式）
-        is_contenteditable = False
-        tag_name = ""
+        # 修复：在设置新文本之前，先彻底清空输入框（双重保险）
+        # 因为即使 ask() 方法中调用了 _tb_clear()，Quill 编辑器可能仍然有残留内容
         try:
-            tag_name = await tb.evaluate("(el) => el.tagName?.toLowerCase() || ''")
-            is_contenteditable = await tb.evaluate("(el) => el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true'")
-            # 额外检查：如果元素有 Quill 编辑器特征，也认为是 contenteditable
-            has_ql_editor = await tb.evaluate("(el) => el.classList?.contains('ql-editor') || el.querySelector?.('.ql-editor') !== null")
-            if has_ql_editor:
-                is_contenteditable = True
-        except Exception:
-            # 检测失败，默认认为是 contenteditable（Gemini 通常使用 contenteditable）
-            is_contenteditable = True
-
-        # 对于 contenteditable 元素，直接使用 JS 注入（更快更可靠）
-        # 对于 textarea，可以使用 type() 或 fill()
-        if is_contenteditable or tag_name != "textarea":
-            # contenteditable：使用 JS 注入（与 base.py 保持一致）
-            # 修复：增强 JS 注入，确保 Quill 编辑器也能正确处理
-            js_code = """
-            (el, t) => {
-                el.focus();
-                // 对于 Quill 编辑器，需要找到实际的编辑器元素
+            await tb.evaluate("""(el) => {
+                // 找到实际的编辑器元素
                 let targetEl = el;
                 if (el.querySelector && el.querySelector('.ql-editor')) {
                     targetEl = el.querySelector('.ql-editor');
                 }
-                // 先清空（确保没有残留内容）
+                // 彻底清空：清空所有可能的文本内容
                 targetEl.innerText = '';
                 targetEl.textContent = '';
-                // 尝试使用 execCommand（更接近真实输入）
-                const ok = document.execCommand && document.execCommand('insertText', false, t);
-                if (!ok) {
-                    // fallback：直接设置文本
-                    targetEl.innerText = t;
-                    targetEl.textContent = t;
-                }
-                // 触发事件
+                // 清空 Quill 编辑器的所有子元素
+                const children = targetEl.querySelectorAll('*');
+                children.forEach(child => {
+                    if (child.innerText !== undefined) child.innerText = '';
+                    if (child.textContent !== undefined) child.textContent = '';
+                });
+                // 触发事件，确保状态更新
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                // 对于 Quill，还需要触发其他事件
                 if (targetEl !== el) {
                     targetEl.dispatchEvent(new Event('input', { bubbles: true }));
                 }
-            }
-            """
-            try:
-                await tb.evaluate(js_code, text)
-            except Exception as e:
-                self._log(f"ask: JS injection failed: {e}, trying fallback...")
-                # Fallback：直接设置 innerText
-                try:
-                    await tb.evaluate("""(el, t) => {
-                        el.innerText = t;
-                        el.textContent = t;
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                    }""", text)
-                except Exception:
-                    raise RuntimeError(f"Failed to set text via JS injection: {e}")
-            
-            # Nudge to trigger state updates (some UIs unlock send button only after key events)
-            try:
-                await self.page.keyboard.type(" ")
-                await self.page.keyboard.press("Backspace")
-            except Exception:
-                pass
-            return
+            }""")
+            await asyncio.sleep(0.1)  # 等待清空完成
+        except Exception:
+            pass  # 清空失败不致命，继续设置文本
 
-        # textarea：对于短 prompt 使用 type()，长 prompt 使用 fill()
-        # 修复：即使检测为 textarea，如果内容很长，也使用 fill() 避免超时
-        if len(text) < self.JS_INJECT_THRESHOLD:
-            # Type quickly; keep timeout bounded.
-            timeout_ms = max(15000, len(text) * 20)
+        # 修复：Gemini 始终使用 JS 注入，不检测元素类型（避免误判）
+        # 因为 Gemini 的输入框始终是 contenteditable，即使检测失败也应该用 JS 注入
+        js_code = """
+        (el, t) => {
+            el.focus();
+            // 对于 Quill 编辑器，需要找到实际的编辑器元素
+            let targetEl = el;
+            if (el.querySelector && el.querySelector('.ql-editor')) {
+                targetEl = el.querySelector('.ql-editor');
+            }
+            // 再次清空（确保没有残留内容，双重保险）
+            targetEl.innerText = '';
+            targetEl.textContent = '';
+            // 清空所有子元素
+            const children = targetEl.querySelectorAll('*');
+            children.forEach(child => {
+                if (child.innerText !== undefined) child.innerText = '';
+                if (child.textContent !== undefined) child.textContent = '';
+            });
+            // 尝试使用 execCommand（更接近真实输入）
+            const ok = document.execCommand && document.execCommand('insertText', false, t);
+            if (!ok) {
+                // fallback：直接设置文本
+                targetEl.innerText = t;
+                targetEl.textContent = t;
+            }
+            // 触发事件
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            // 对于 Quill，还需要触发其他事件
+            if (targetEl !== el) {
+                targetEl.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+        """
+        
+        # 修复：增强错误处理，确保即使 JS 注入失败也有 fallback
+        try:
+            await tb.evaluate(js_code, text)
+            self._log(f"ask: text set via JS injection (len={len(text)})")
+        except Exception as e:
+            self._log(f"ask: JS injection failed: {e}, trying fallback...")
+            # Fallback 1：直接设置 innerText（更简单的方法）
             try:
-                await tb.type(text, delay=0, timeout=timeout_ms)
-            except Exception as type_err:
-                # type() 失败，fallback 到 fill()
-                self._log(f"ask: type() failed ({type_err}), using fill() as fallback...")
-                await tb.fill(text)
-        else:
-            # 长 prompt 直接使用 fill()
-            await tb.fill(text)
+                await tb.evaluate("""(el, t) => {
+                    // 找到实际的编辑器元素
+                    let targetEl = el;
+                    if (el.querySelector && el.querySelector('.ql-editor')) {
+                        targetEl = el.querySelector('.ql-editor');
+                    }
+                    // 先清空（确保没有残留内容）
+                    targetEl.innerText = '';
+                    targetEl.textContent = '';
+                    // 清空所有子元素
+                    const children = targetEl.querySelectorAll('*');
+                    children.forEach(child => {
+                        if (child.innerText !== undefined) child.innerText = '';
+                        if (child.textContent !== undefined) child.textContent = '';
+                    });
+                    // 设置新文本
+                    targetEl.innerText = t;
+                    targetEl.textContent = t;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }""", text)
+                self._log(f"ask: text set via fallback JS (len={len(text)})")
+            except Exception as e2:
+                self._log(f"ask: fallback JS also failed: {e2}, trying fill()...")
+                # Fallback 2：使用 fill()（最后的兜底方案）
+                # 注意：fill() 会自动清空，但为了保险，我们也先手动清空
+                try:
+                    # 先手动清空
+                    await tb.evaluate("""(el) => {
+                        let targetEl = el;
+                        if (el.querySelector && el.querySelector('.ql-editor')) {
+                            targetEl = el.querySelector('.ql-editor');
+                        }
+                        targetEl.innerText = '';
+                        targetEl.textContent = '';
+                    }""")
+                    await asyncio.sleep(0.1)
+                    # 然后使用 fill()
+                    await tb.fill(text)
+                    self._log(f"ask: text set via fill() (len={len(text)})")
+                except Exception as e3:
+                    # 所有方法都失败，抛出异常
+                    raise RuntimeError(f"Failed to set text: JS injection failed ({e}), fallback JS failed ({e2}), fill() failed ({e3})")
+        
+        # Nudge to trigger state updates (some UIs unlock send button only after key events)
+        try:
+            await self.page.keyboard.type(" ")
+            await self.page.keyboard.press("Backspace")
+        except Exception:
+            pass
 
     async def _is_generating(self) -> bool:
-        for sel in self.STOP_BTN:
+        # 优化：使用并行检查，减少等待时间，避免 Future exception
+        # 修复：显式捕获 TimeoutError，避免 Future exception was never retrieved
+        async def check_stop(sel: str) -> bool:
             try:
                 loc = self.page.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
+                if await loc.count() > 0:
+                    # 使用 wait_for 而不是 is_visible，但设置短超时，避免 Future exception
+                    try:
+                        await loc.wait_for(state="visible", timeout=300)  # 300ms 超时
+                        return True
+                    except (asyncio.TimeoutError, Exception):
+                        # 显式捕获 TimeoutError，避免 Future exception
+                        return False
+            except (asyncio.TimeoutError, Exception):
+                # 显式捕获所有异常，避免 Future exception
+                pass
+            return False
+        
+        # 只检查前 2 个选择器，并行执行，总超时 0.5 秒
+        try:
+            tasks = [check_stop(sel) for sel in self.STOP_BTN[:2]]
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=0.5
+            )
+            for result in results:
+                if isinstance(result, bool) and result:
                     return True
-            except Exception:
-                continue
+        except (asyncio.TimeoutError, Exception):
+            # 显式捕获 TimeoutError，避免 Future exception
+            pass
         return False
 
     async def _assistant_turn_locator(self) -> Optional[Locator]:
@@ -516,8 +581,23 @@ class GeminiAdapter(SiteAdapter):
         await self._dismiss_popups()
         tb = await self._fast_find_textbox()
         if tb:
-            self._log("ensure_ready: textbox found quickly (fast path)")
-            return
+            # 优化：增加 actionability 检查，确保元素不仅可见而且可操作
+            # 修复：页面可能还在进行 Hydration（水合），DOM 存在但事件监听没挂载
+            try:
+                # 确保元素不仅可见，而且是可编辑状态
+                await tb.wait_for(state="visible", timeout=2000)
+                # 检查 contenteditable 属性是否真的为 true
+                is_editable = await tb.evaluate("""(el) => {
+                    return el.getAttribute('contenteditable') === 'true' || el.contentEditable === 'true';
+                }""")
+                if is_editable:
+                    self._log("ensure_ready: textbox found quickly (fast path) and is editable")
+                    return
+                else:
+                    self._log("ensure_ready: textbox found but not editable yet, continuing...")
+            except Exception:
+                # 检查失败，继续正常路径
+                pass
 
         # Normal path (bounded)
         t0 = time.time()
@@ -626,57 +706,79 @@ class GeminiAdapter(SiteAdapter):
     async def _sent_accepted(self, tb: Locator, before_len: int, assist_cnt0: int, assist_hash0: str, timeout_s: float = 1.3) -> Optional[str]:
         """
         Return a reason string if send is accepted; else None.
+        优化：实现"信号竞争"机制，并行检查多个信号，谁先到就算谁。
         Strong signals (any one):
-          - textbox cleared/shrunk
+          - textbox cleared/shrunk (最可靠)
           - stop button visible
           - assistant_count increased
           - last assistant hash changed
         """
-        # 修复：优化检查顺序，先检查最快的信号（textbox cleared），最后检查最慢的（assistant_count/hash）
+        # 优化：使用并行检查，实现"信号竞争"机制
         t0 = time.time()
-        check_count = 0
-        max_checks = int(timeout_s / 0.15)  # 根据 timeout_s 计算最大检查次数
+        check_interval = 0.1  # 减少检查间隔，加快响应速度
         
-        while time.time() - t0 < timeout_s and check_count < max_checks:
-            check_count += 1
+        while time.time() - t0 < timeout_s:
+            # 并行检查所有信号，谁先成功就返回
+            tasks = []
             
-            # 1. 最快：textbox cleared（最可靠的信号）
-            try:
-                cur = (await self._tb_get_text(tb)).strip()
-                cur_len = len(cur)
-                if before_len > 0 and cur_len <= max(0, int(before_len * 0.1)):
-                    return f"textbox_clear({before_len}->{cur_len})"
-            except Exception:
-                pass
-
-            # 2. 快速：stop button visible
-            try:
-                if await self._is_generating():
-                    return "stop_visible"
-            except Exception:
-                pass
-
-            # 3. 较慢：assistant_count（只在检查次数较少时检查，避免频繁调用）
-            if check_count % 2 == 0:  # 每 2 次检查一次
+            # 1. 最快：textbox cleared（最可靠的信号，优先检查）
+            async def check_textbox_clear():
                 try:
-                    c = await asyncio.wait_for(self._assistant_count(), timeout=0.8)  # 减少超时时间
+                    cur = (await self._tb_get_text(tb)).strip()
+                    cur_len = len(cur)
+                    if before_len > 0 and cur_len <= max(0, int(before_len * 0.1)):
+                        return f"textbox_clear({before_len}->{cur_len})"
+                except Exception:
+                    pass
+                return None
+            
+            # 2. 快速：stop button visible
+            async def check_stop_button():
+                try:
+                    if await self._is_generating():
+                        return "stop_visible"
+                except Exception:
+                    pass
+                return None
+            
+            # 3. 较慢：assistant_count（只在检查次数较少时检查，避免频繁调用）
+            async def check_assistant_count():
+                try:
+                    c = await asyncio.wait_for(self._assistant_count(), timeout=0.6)
                     if c > assist_cnt0:
                         return f"assistant_count_inc({assist_cnt0}->{c})"
-                except Exception:
+                except (asyncio.TimeoutError, Exception):
                     pass
+                return None
+            
+            # 并行执行所有检查
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        check_textbox_clear(),
+                        check_stop_button(),
+                        check_assistant_count(),
+                        return_exceptions=True
+                    ),
+                    timeout=min(0.8, timeout_s - (time.time() - t0))  # 每次检查最多 0.8 秒
+                )
+                
+                # 检查结果，优先返回 textbox_clear（最可靠）
+                for result in results:
+                    if isinstance(result, str) and result:
+                        # 优先返回 textbox_clear
+                        if "textbox_clear" in result:
+                            return result
+                
+                # 如果没有 textbox_clear，返回其他成功的信号
+                for result in results:
+                    if isinstance(result, str) and result:
+                        return result
+            except (asyncio.TimeoutError, Exception):
+                # 并行检查超时，继续下一轮
+                pass
 
-            # 4. 最慢：assistant hash（只在检查次数较多时检查，避免频繁调用）
-            if check_count >= 3:  # 前 3 次不检查 hash
-                try:
-                    last = await asyncio.wait_for(self._last_text(), timeout=0.8)  # 减少超时时间
-                    if last:
-                        h = self._sha8(last)
-                        if assist_hash0 and h != assist_hash0:
-                            return f"assistant_hash_changed({assist_hash0}->{h})"
-                except Exception:
-                    pass
-
-            await asyncio.sleep(0.15)  # 稍微增加间隔，减少检查频率
+            await asyncio.sleep(check_interval)
 
         return None
 
@@ -695,9 +797,10 @@ class GeminiAdapter(SiteAdapter):
         except Exception as e:
             self._log(f"send: Enter(keyboard) error: {type(e).__name__}: {str(e)[:120]}")
 
-        # 优化：激进检查 - 如果输入框在 2 秒内变空，直接认为发送成功，跳过后续所有按钮点击
+        # 优化：激进检查 - 如果输入框在 1.5 秒内变空，直接认为发送成功，跳过后续所有按钮点击
+        # 优化：强制使用 textbox_clear 判定法（最可靠，比按钮点击可靠 100 倍）
         try:
-            # 使用 wait_for_function 快速检测输入框是否变空
+            # 使用 wait_for_function 快速检测输入框是否变空（最可靠的信号）
             await asyncio.wait_for(
                 self.page.wait_for_function(
                     """() => {
@@ -705,18 +808,19 @@ class GeminiAdapter(SiteAdapter):
                             || document.querySelector('div[contenteditable="true"]');
                         return el && (el.innerText || el.textContent || '').trim() === '';
                     }""",
-                    timeout=2000
+                    timeout=1500  # 减少到 1.5 秒，加快响应
                 ),
-                timeout=2.2  # 总超时 2.2 秒
+                timeout=1.7  # 总超时 1.7 秒
             )
-            self._log("send: fast confirm - Enter key worked (input cleared in 2s)!")
+            self._log("send: fast confirm - Enter key worked (input cleared in 1.5s)!")
             return "enter:fast_confirm_textbox_cleared"
-        except Exception:
+        except (asyncio.TimeoutError, Exception):
             # Enter 没生效或超时，继续走后面的检查逻辑
+            # 显式捕获 TimeoutError，避免 Future exception
             pass
 
-        # 修复：减少等待时间，从 1.3 秒减少到 1.0 秒
-        reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=1.0)
+        # 优化：使用并行"信号竞争"机制，减少等待时间
+        reason = await self._sent_accepted(tb, before_len, assist_cnt0, assist_hash0, timeout_s=0.8)  # 减少到 0.8 秒
         if reason:
             return f"enter:{reason}"
 
@@ -819,20 +923,67 @@ class GeminiAdapter(SiteAdapter):
             if check_text2.strip():
                 self._log(f"ask: warning - textbox still has content after second clear (len={len(check_text2)}), proceeding anyway...")
         
-        await self._tb_set_text(tb, prompt)
-        await asyncio.sleep(0.15)
+        # 修复：添加异常处理，确保即使输入失败也能触发 manual_checkpoint
+        try:
+            await self._tb_set_text(tb, prompt)
+            await asyncio.sleep(0.15)
+        except Exception as e:
+            await self.save_artifacts("gemini_set_text_failed")
+            self._log(f"ask: _tb_set_text failed: {type(e).__name__}: {str(e)[:180]}")
+            
+            # 触发 manual_checkpoint，让用户手动输入
+            async def _ready_check_text_set() -> bool:
+                # 检查文本是否已经设置成功
+                try:
+                    current_text = (await self._tb_get_text(tb)).strip()
+                    if len(current_text) >= len(prompt) * 0.8:  # 至少 80% 的内容
+                        return True
+                except Exception:
+                    pass
+                return False
+            
+            await self.manual_checkpoint(
+                f"Gemini 输入文本失败。请在浏览器中手动输入 prompt 后回到终端继续。\nPrompt 长度: {len(prompt)} 字符",
+                ready_check=_ready_check_text_set,
+                max_wait_s=120,
+            )
+            
+            # 手动输入后，再次验证
+            await asyncio.sleep(0.5)
+            current_text = (await self._tb_get_text(tb)).strip()
+            if len(current_text) < len(prompt) * 0.5:
+                raise RuntimeError(f"ask: text not set after manual checkpoint (expected ~{len(prompt)} chars, got {len(current_text)} chars)")
 
         before_text = (await self._tb_get_text(tb)).strip()
         before_len = len(before_text)
         self._log(f"send: textbox content before send (len={before_len})")
         
-        # 修复：验证输入内容是否正确，如果长度不匹配，记录警告
+        # 修复：验证输入内容是否正确，如果长度不匹配，可能是残留内容
         expected_len = len(prompt)
         if before_len != expected_len:
             len_diff = abs(before_len - expected_len)
             len_ratio = min(before_len, expected_len) / max(before_len, expected_len) if max(before_len, expected_len) > 0 else 0
             if len_ratio < 0.9:  # 长度差异超过 10%
                 self._log(f"ask: warning - textbox content length mismatch (expected={expected_len}, actual={before_len}, diff={len_diff})")
+                # 如果实际长度明显大于预期，可能是残留内容，尝试再次清空并设置
+                if before_len > expected_len * 1.2:  # 实际长度超过预期 20%
+                    self._log(f"ask: textbox content too long (may have residual content), clearing and retrying...")
+                    try:
+                        await self._tb_clear(tb)
+                        await asyncio.sleep(0.2)
+                        await self._tb_set_text(tb, prompt)
+                        await asyncio.sleep(0.15)
+                        # 再次验证
+                        before_text_retry = (await self._tb_get_text(tb)).strip()
+                        before_len_retry = len(before_text_retry)
+                        self._log(f"send: textbox content after retry (len={before_len_retry})")
+                        if abs(before_len_retry - expected_len) < abs(before_len - expected_len):
+                            # 重试后更接近预期，使用重试后的值
+                            before_text = before_text_retry
+                            before_len = before_len_retry
+                            self._log(f"ask: retry improved content length (now {before_len_retry} vs expected {expected_len})")
+                    except Exception as retry_err:
+                        self._log(f"ask: retry failed ({retry_err}), proceeding with original content")
 
         # Trigger send (bounded). On failure, manual checkpoint with real ready_check.
         t_send = time.time()
