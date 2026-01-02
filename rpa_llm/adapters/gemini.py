@@ -784,8 +784,8 @@ class GeminiAdapter(SiteAdapter):
 
     # ===== Send + Wait =====
 
-    # P1优化：减少默认超时时间，从 1.3 秒减少到 1.0 秒，加快发送确认速度
-    async def _sent_accepted(self, tb: Locator, before_len: int, assist_cnt0: int, assist_hash0: str, timeout_s: float = 1.0) -> Optional[str]:  # 从 1.3 秒减少到 1.0 秒
+    # P1优化：进一步减少默认超时时间，从 1.0 秒减少到 0.8 秒，加快发送确认速度
+    async def _sent_accepted(self, tb: Locator, before_len: int, assist_cnt0: int, assist_hash0: str, timeout_s: float = 0.8) -> Optional[str]:  # 从 1.0 秒减少到 0.8 秒
         """
         Return a reason string if send is accepted; else None.
         优化：实现"信号竞争"机制，并行检查多个信号，谁先到就算谁。
@@ -797,8 +797,8 @@ class GeminiAdapter(SiteAdapter):
         """
         # 优化：使用并行检查，实现"信号竞争"机制
         t0 = time.time()
-        # P1优化：减少检查间隔，从 0.1 秒减少到 0.05 秒，加快响应速度
-        check_interval = 0.05  # 从 0.1 秒减少到 0.05 秒
+        # P1优化：进一步减少检查间隔，从 0.05 秒减少到 0.03 秒，加快响应速度
+        check_interval = 0.03  # 从 0.05 秒减少到 0.03 秒
         
         while time.time() - t0 < timeout_s:
             # 并行检查所有信号，谁先成功就返回
@@ -878,14 +878,25 @@ class GeminiAdapter(SiteAdapter):
         self._log("send: trying Control+Enter first (most reliable)...")
         try:
             # 优化：减少 focus 超时时间，如果 focus 失败，直接使用 page.keyboard（不依赖 focus）
+            # P0优化：添加异常处理，避免 Future exception
             try:
                 await tb.focus(timeout=1000)  # 从 2000ms 减少到 1000ms
-            except Exception:
+            except Exception as e:
+                # 优化：捕获所有异常，包括 TargetClosedError，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during focus: {e}") from e
                 # focus 失败不影响继续，直接使用 page.keyboard
                 pass
             
-            await self.page.keyboard.press("Control+Enter")
-            self._log("send: Control+Enter pressed")
+            # P0优化：添加异常处理，避免 Future exception
+            try:
+                await self.page.keyboard.press("Control+Enter")
+                self._log("send: Control+Enter pressed")
+            except Exception as e:
+                # 优化：捕获所有异常，包括 TargetClosedError，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during Control+Enter: {e}") from e
+                raise
             
             # 优化：立即检查，不等待，减少延迟
             await asyncio.sleep(0.05)  # 从 0.1s 减少到 0.05s
@@ -920,18 +931,30 @@ class GeminiAdapter(SiteAdapter):
         self._log("send: trying Enter as fallback (keyboard)")
         try:
             # 优化：减少 focus 超时时间，如果 focus 失败，直接使用 page.keyboard（不依赖 focus）
+            # P0优化：添加异常处理，避免 Future exception
             try:
                 await tb.focus(timeout=1000)  # 从 2000ms 减少到 1000ms
-            except Exception:
+            except Exception as e:
+                # 优化：捕获所有异常，包括 TargetClosedError，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during focus: {e}") from e
                 # focus 失败不影响继续，直接使用 page.keyboard
                 pass
             
-            await self.page.keyboard.press("Enter")
+            # P0优化：添加异常处理，避免 Future exception
+            try:
+                await self.page.keyboard.press("Enter")
+            except Exception as e:
+                # 优化：捕获所有异常，包括 TargetClosedError，避免 Future exception
+                if "TargetClosed" in str(e) or "Target page" in str(e) or "Target context" in str(e):
+                    raise RuntimeError(f"Browser/page closed during Enter: {e}") from e
+                raise
         except Exception as e:
             self._log(f"send: Enter(keyboard) error: {type(e).__name__}: {str(e)[:120]}")
 
         # 优化：激进检查 - 如果输入框在 1.0 秒内变空，直接认为发送成功，跳过后续所有按钮点击
         # 优化：强制使用 textbox_clear 判定法（最可靠，比按钮点击可靠 100 倍）
+        # P0优化：添加异常处理，避免 Future exception
         try:
             # 使用 wait_for_function 快速检测输入框是否变空（最可靠的信号）
             await asyncio.wait_for(

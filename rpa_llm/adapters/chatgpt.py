@@ -703,8 +703,8 @@ class ChatGPTAdapter(SiteAdapter):
         # 这样可以更快地检测到发送成功，避免长时间等待
         combined_user_sel = ", ".join(self.USER_MSG)
         
-        # 高频轮询检查（每 0.005 秒检查一次，最多 0.5 秒）- P0优化：从 1.0 秒减少到 0.5 秒
-        max_attempts = 100  # 0.5 秒 / 0.005 秒 = 100 次（从 200 次减少到 100 次，加快检测速度）
+        # 高频轮询检查（每 0.005 秒检查一次，最多 0.8 秒）- P0优化：从 0.5 秒增加到 0.8 秒，提高成功率
+        max_attempts = 160  # 0.8 秒 / 0.005 秒 = 160 次（从 100 次增加到 160 次，提高发送确认成功率）
         for attempt in range(max_attempts):
             try:
                 # 并行检查多个信号：user_count, textbox cleared, stop button
@@ -761,7 +761,8 @@ class ChatGPTAdapter(SiteAdapter):
         
         # 如果高频轮询失败，尝试并行确认（作为兜底，但减少超时时间）
         self._log("send: high-frequency polling failed, trying parallel confirmation...")
-        if await self._fast_send_confirm(user0, timeout_ms=100):  # 从 150ms 减少到 100ms，加快确认
+        # P0优化：从 100ms 减少到 50ms，加快确认速度
+        if await self._fast_send_confirm(user0, timeout_ms=50):  # 从 100ms 减少到 50ms
             self._log("send: fast path confirmed (parallel confirmation)")
             return
         
@@ -883,8 +884,8 @@ class ChatGPTAdapter(SiteAdapter):
             try:
                 if attempt > 0:
                     self._log(f"send: attempt {attempt+1}, re-finding textbox and clearing...")
-                    # P1优化：重试时重新查找元素（元素可能已变化），减少等待时间
-                    await asyncio.sleep(0.5)  # 从 1.5 秒减少到 0.5 秒，加快重试速度
+                    # P1优化：重试时重新查找元素（元素可能已变化），进一步减少等待时间
+                    await asyncio.sleep(0.3)  # 从 0.5 秒减少到 0.3 秒，加快重试速度
                     found_retry = await self._find_textbox_any_frame()
                     if found_retry:
                         tb, frame, how = found_retry
@@ -1948,8 +1949,8 @@ class ChatGPTAdapter(SiteAdapter):
                     # 优化：减少超时时间，从 assistant_wait_timeout 减少到 min(assistant_wait_timeout, 3) 秒
                     # 修复：assistant wait 耗时 102 秒的主要原因是 wait_for_function 超时时间太长（90秒）
                     # 应该使用更短的超时时间，如果超时就立即检查文本变化，而不是等待 90 秒
-                    # P0优化：从 5 秒减少到 3 秒，加快检测速度
-                    wait_timeout_ms = int(min(assistant_wait_timeout, 3) * 1000)  # 最多 3 秒（从 5 秒减少到 3 秒）
+                    # P1优化：从 3 秒减少到 2 秒，加快检测速度，立即检查文本变化
+                    wait_timeout_ms = int(min(assistant_wait_timeout, 2) * 1000)  # 最多 2 秒（从 3 秒减少到 2 秒）
                     await self.page.wait_for_function(
                         """(args) => {
                             const n0 = args.n0;
@@ -1980,9 +1981,10 @@ class ChatGPTAdapter(SiteAdapter):
                                     self._log("ask: text changed, assuming new message (text change detected)")
                                     n_assist1 = n_assist0 + 1  # 合成值
                                 else:
-                                    # 如果文本也没有变化，再等待一下（最多 2 秒）然后再次检查
-                                    self._log("ask: no text change yet, waiting 2s and re-checking...")
-                                    await asyncio.sleep(2.0)
+                                    # P1优化：如果文本也没有变化，再等待一下（最多 1 秒）然后再次检查
+                                    # 从 2 秒减少到 1 秒，加快检测速度
+                                    self._log("ask: no text change yet, waiting 1s and re-checking...")
+                                    await asyncio.sleep(1.0)  # 从 2.0 秒减少到 1.0 秒
                                     # 再次检查文本变化
                                     try:
                                         text_retry = await asyncio.wait_for(self._last_assistant_text(), timeout=0.5)
