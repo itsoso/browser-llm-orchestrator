@@ -231,8 +231,9 @@ class ChatGPTAdapter(SiteAdapter):
         """辅助方法：在指定 frame 中尝试查找选择器"""
         try:
             loc = frame.locator(selector).first
-            await loc.wait_for(state="attached", timeout=500)
-            if await asyncio.wait_for(self._try_visible(loc), timeout=0.5):
+            # 优化：减少等待时间，加快检查速度
+            await loc.wait_for(state="attached", timeout=300)  # 从 500ms 减少到 300ms
+            if await asyncio.wait_for(self._try_visible(loc), timeout=0.3):  # 从 0.5s 减少到 0.3s
                 return loc, frame, how
         except (asyncio.TimeoutError, Exception):
             pass
@@ -261,19 +262,39 @@ class ChatGPTAdapter(SiteAdapter):
         return False
 
     async def _set_thinking_toggle(self, want_thinking: bool) -> None:
+        # 优化：添加超时机制，避免长时间等待
+        t0 = time.time()
+        timeout_s = 5.0  # 最多等待 5 秒
+        
         for sel in self.THINKING_TOGGLE:
+            if time.time() - t0 > timeout_s:
+                self._log(f"mode: thinking toggle timeout after {timeout_s}s, skip")
+                return
+            
             try:
                 btn = self.page.locator(sel).first
-                if await btn.count() == 0 or not await btn.is_visible():
+                # 优化：使用更快的检查方式，减少等待时间
+                try:
+                    count = await asyncio.wait_for(btn.count(), timeout=0.5)
+                    if count == 0:
+                        continue
+                except (asyncio.TimeoutError, Exception):
                     continue
-                pressed = await btn.get_attribute("aria-pressed")
+                
+                try:
+                    if not await asyncio.wait_for(btn.is_visible(), timeout=0.5):
+                        continue
+                except (asyncio.TimeoutError, Exception):
+                    continue
+                
+                pressed = await asyncio.wait_for(btn.get_attribute("aria-pressed"), timeout=0.5)
                 is_on = (pressed == "true")
                 if want_thinking != is_on:
-                    await btn.click()
-                    await asyncio.sleep(0.4)
+                    await btn.click(timeout=2000)  # 2秒超时
+                    await asyncio.sleep(0.2)  # 从 0.4s 减少到 0.2s
                     self._log(f"mode: set thinking={want_thinking} via {sel}")
                 return
-            except Exception:
+            except (asyncio.TimeoutError, Exception):
                 continue
 
     async def _select_model_menu_item(self, pattern: re.Pattern) -> bool:
@@ -367,11 +388,14 @@ class ChatGPTAdapter(SiteAdapter):
         t0 = time.time()
         hb = t0
         check_count = 0
+        # 优化：如果连续多次找不到，增加 dismiss overlays 的频率
+        last_dismiss_time = t0
 
         while time.time() - t0 < total_timeout_s:
-            # 前几次检查不 dismiss overlays，加快速度
-            if check_count >= 3:
+            # 优化：每 2 秒 dismiss overlays 一次，而不是等到第 3 次检查
+            if time.time() - last_dismiss_time >= 2.0:
                 await self._dismiss_overlays()
+                last_dismiss_time = time.time()
             
             found = await self._find_textbox_any_frame()
             if found:
@@ -384,8 +408,8 @@ class ChatGPTAdapter(SiteAdapter):
                 self._log(f"ensure_ready: still locating textbox... (attempt {check_count})")
                 hb = time.time()
 
-            # 前几次快速检查，之后逐渐增加间隔
-            sleep_time = 0.2 if check_count < 5 else 0.4
+            # 优化：前几次快速检查，之后逐渐增加间隔，但最大不超过 0.3 秒
+            sleep_time = 0.15 if check_count < 5 else 0.25  # 从 0.2/0.4 减少到 0.15/0.25
             await asyncio.sleep(sleep_time)
 
         await self.save_artifacts("ensure_ready_failed")
@@ -735,7 +759,8 @@ class ChatGPTAdapter(SiteAdapter):
                 # 尝试关闭弹窗/遮罩
                 await self._dismiss_overlays()
                 self._log(f"send: textbox not found, retrying... ({retry+1}/{max_retries})")
-                await asyncio.sleep(0.5)
+                # 优化：减少重试间隔，加快重试速度
+                await asyncio.sleep(0.3)  # 从 0.5s 减少到 0.3s
             else:
                 # 最后一次尝试失败，保存截图并触发 manual checkpoint
                 await self.save_artifacts("send_no_textbox")
