@@ -613,9 +613,9 @@ def main():
     base_path = args.base_path or config.get("obsidian", {}).get("base_path")
     template_path = args.template or config.get("obsidian", {}).get("template")
     driver_url = args.driver_url or config.get("driver", {}).get("url")
-        arbitrator_site = args.arbitrator_site or config.get("llm", {}).get("arbitrator_site", "gemini")
-        # 支持 --model-version 和 --model_version 两种格式
-        model_version = args.model_version or getattr(args, "model_version", None) or config.get("llm", {}).get("model_version", "5.2pro")
+    arbitrator_site = args.arbitrator_site or config.get("llm", {}).get("arbitrator_site", "gemini")
+    # 支持 --model-version 和 --model_version 两种格式
+    model_version = args.model_version or getattr(args, "model_version", None) or config.get("llm", {}).get("model_version", "5.2pro")
     task_timeout_s = args.task_timeout_s or config.get("llm", {}).get("task_timeout_s", 600)
     log_file = args.log_file or config.get("logging", {}).get("log_file")
     
