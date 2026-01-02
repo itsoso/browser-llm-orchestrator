@@ -379,8 +379,27 @@ async def run_automation(
     4. 调用 LLM 分析
     5. 保存 summary 文件
     """
-    print(f"[{beijing_now_iso()}] [automation] 开始自动化流程")
+    # 生成请求 ID，便于追踪和去重
+    import uuid
+    request_id = str(uuid.uuid4())[:8]
+    
+    print(f"[{beijing_now_iso()}] [automation] 开始自动化流程 (request_id={request_id})")
     print(f"[{beijing_now_iso()}] [automation] talker={talker}, date_range={format_date_range(start, end)}")
+    
+    # 检查是否已经有相同的 summary 文件（防止重复执行）
+    from .vault import build_obsidian_paths
+    paths = build_obsidian_paths(base_path, talker, start, subdir="10-Summaries")
+    date_range_str = format_date_range(start, end)
+    week = paths["week"]
+    normalized_model_version = normalize_model_version_for_filename(model_version)
+    summary_filename = f"{talker} 第{week}周-{date_range_str}-Sum-{normalized_model_version}.md"
+    summary_path = paths["dir"] / summary_filename
+    
+    if summary_path.exists():
+        print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: 检测到已存在的 summary 文件: {summary_path}")
+        print(f"[{beijing_now_iso()}] [automation] 如果确实需要重新分析，请先删除该文件")
+        print(f"[{beijing_now_iso()}] [automation] 跳过本次执行 (request_id={request_id})")
+        return
     
     # 步骤 1: 获取聊天记录
     client = ChatlogClient(chatlog_url)
@@ -451,7 +470,7 @@ async def run_automation(
             print(f"[{beijing_now_iso()}] [automation] 提示: 请确保 driver_server 正在运行")
             print(f"[{beijing_now_iso()}] [automation] 启动命令: python start_driver.py --brief ./brief.yaml")
         
-        print(f"[{beijing_now_iso()}] [automation] 发送到 {arbitrator_site} 进行分析 (model_version={model_version}, timeout={task_timeout_s}s)...")
+        print(f"[{beijing_now_iso()}] [automation] 发送到 {arbitrator_site} 进行分析 (request_id={request_id}, model_version={model_version}, timeout={task_timeout_s}s)...")
         
         try:
             payload = await asyncio.to_thread(
@@ -523,14 +542,14 @@ async def run_automation(
             
             raise RuntimeError(error_msg)
         
-        print(f"[{beijing_now_iso()}] [automation] ✓ LLM 分析完成")
+        print(f"[{beijing_now_iso()}] [automation] ✓ LLM 分析完成 (request_id={request_id})")
         
         # 步骤 5: 保存 summary 文件
         summary_path = await save_summary_file(
             answer, base_path, talker, start, end, model_version
         )
         
-        print(f"[{beijing_now_iso()}] [automation] ✓ 自动化流程完成")
+        print(f"[{beijing_now_iso()}] [automation] ✓ 自动化流程完成 (request_id={request_id})")
         print(f"[{beijing_now_iso()}] [automation] Raw 文件: {raw_path}")
         print(f"[{beijing_now_iso()}] [automation] Summary 文件: {summary_path}")
         
