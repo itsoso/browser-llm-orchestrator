@@ -235,25 +235,75 @@ async def load_template_and_generate_prompt(
         "{{conversation_content}}": raw_content,
     }
     
-    for placeholder, value in replacements.items():
-        template = template.replace(placeholder, value)
+    # 记录替换前的状态
+    has_conversation_placeholder = "{{conversation_content}}" in template
+    raw_content_len = len(raw_content)
     
-    # 再替换 {} 格式的占位符（Python format）
+    for placeholder, value in replacements.items():
+        if placeholder in template:
+            template = template.replace(placeholder, value)
+            # 对于 conversation_content，记录替换信息
+            if placeholder == "{{conversation_content}}":
+                print(f"[{beijing_now_iso()}] [automation] 替换占位符 {placeholder} (内容长度: {len(value)} 字符)")
+    
+    # 验证 conversation_content 是否被替换
+    if has_conversation_placeholder:
+        if "{{conversation_content}}" in template:
+            print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: {{conversation_content}} 占位符未被替换！")
+            # 尝试手动替换
+            template = template.replace("{{conversation_content}}", raw_content)
+            print(f"[{beijing_now_iso()}] [automation] 手动替换 {{conversation_content}} 成功")
+        else:
+            # 验证替换后的内容是否包含聊天内容
+            if raw_content_len > 0:
+                content_preview = raw_content[:100].strip()
+                if content_preview and content_preview not in template:
+                    print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: 替换后模板中未找到聊天内容预览")
+                else:
+                    print(f"[{beijing_now_iso()}] [automation] ✓ {{conversation_content}} 占位符已成功替换")
+    
+    # 再替换 {} 格式的占位符（Python format）- 注意：此时 {{}} 格式已经被替换了
+    # 使用 safe_format 避免 KeyError，只替换存在的占位符
     try:
-        prompt = template.format(
-            conversation_content=raw_content,
-            talker=talker,
-            date_range=date_range,
-            week=week,
-            period_start=period_start,
-            period_end=period_end,
-            period_start_dot=period_start_dot,
-            period_end_dot=period_end_dot,
-            raw_note=raw_note,
-        )
-    except KeyError:
+        # 先检查是否有未替换的 {} 格式占位符
+        import re
+        remaining_placeholders = re.findall(r'\{(\w+)\}', template)
+        if remaining_placeholders:
+            # 只替换存在的占位符
+            prompt = template.format(
+                conversation_content=raw_content,  # 双重保险
+                talker=talker,
+                date_range=date_range,
+                week=week,
+                period_start=period_start,
+                period_end=period_end,
+                period_start_dot=period_start_dot,
+                period_end_dot=period_end_dot,
+                raw_note=raw_note,
+            )
+        else:
+            prompt = template
+    except KeyError as e:
         # 如果有些占位符没有提供，直接使用替换后的模板
+        print(f"[{beijing_now_iso()}] [automation] ⚠️  Python format 替换时缺少占位符: {e}，使用已替换的模板")
         prompt = template
+    
+    # 最终验证：确保 prompt 中包含聊天内容
+    if raw_content_len > 0:
+        # 检查 prompt 中是否包含聊天内容的前100个字符
+        content_preview = raw_content[:100].strip()
+        if content_preview and content_preview not in prompt:
+            # 检查是否至少包含一些关键词
+            keywords = ["对话", "聊天", "消息", "记录", "群聊", "王川", "2026-01-02"]
+            has_keywords = any(kw in prompt for kw in keywords)
+            if not has_keywords:
+                print(f"[{beijing_now_iso()}] [automation] ✗ 错误: Prompt 中未找到聊天内容！")
+                print(f"[{beijing_now_iso()}] [automation] Raw 内容预览: {content_preview[:200]}...")
+                print(f"[{beijing_now_iso()}] [automation] Prompt 预览: {prompt[:500]}...")
+            else:
+                print(f"[{beijing_now_iso()}] [automation] ✓ Prompt 验证通过（包含聊天内容关键词）")
+        else:
+            print(f"[{beijing_now_iso()}] [automation] ✓ Prompt 验证通过（包含聊天内容）")
     
     return prompt
 
