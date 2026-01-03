@@ -301,6 +301,7 @@ class ChatGPTWaiter:
         self._log("ask: waiting for new message content (using index-based detection)...")
         t2 = time.time()
         hb = t2
+        thinking_log_hb = t2  # 用于控制 thinking 模式下的日志频率
         new_message_found = False
         elapsed = time.time() - ask_start_time
         remaining = timeout_s - elapsed
@@ -334,6 +335,23 @@ class ChatGPTWaiter:
                     elapsed = time.time() - ask_start_time
                     if elapsed >= timeout_s - 10:  # 留10秒给稳定等待
                         break
+                    
+                    # 关键修复：在等待内容时，优先检查 thinking 状态
+                    # 如果 ChatGPT Pro 还在思考中，应该继续等待，而不是认为内容已出现
+                    try:
+                        thinking = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
+                        if thinking:
+                            # 控制日志频率：每 3 秒打印一次，避免日志过于频繁
+                            if time.time() - thinking_log_hb >= 3.0:
+                                self._log(f"ask: detected thinking mode during content wait, extending timeout (elapsed={elapsed:.1f}s/{timeout_s}s)")
+                                thinking_log_hb = time.time()
+                            # 如果检测到 thinking，延长超时时间，继续等待
+                            content_wait_timeout = min(30, remaining * 0.3)  # 最多30秒或剩余时间的30%
+                            await asyncio.sleep(0.5)  # 思考模式下等待更长时间
+                            continue
+                    except Exception:
+                        pass  # thinking 检测失败不影响继续
+                    
                     try:
                         # 使用索引定位，确保读取的是新消息
                         current_text = await asyncio.wait_for(
@@ -341,6 +359,22 @@ class ChatGPTWaiter:
                             timeout=1.2
                         )
                         if current_text and current_text != last_assist_text_before:
+                            # 关键修复：即使检测到文本，也要检查是否还在 thinking 状态
+                            # 如果还在 thinking，文本可能是占位符，不应该认为内容已出现
+                            try:
+                                thinking_check = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
+                                if thinking_check:
+                                    # 控制日志频率：每 3 秒打印一次
+                                    if time.time() - thinking_log_hb >= 3.0:
+                                        self._log(f"ask: text detected but still in thinking mode, continuing to wait (len={len(current_text)})")
+                                        thinking_log_hb = time.time()
+                                    # 如果文本很短（可能是占位符），继续等待
+                                    if len(current_text.strip()) < 100:
+                                        await asyncio.sleep(0.5)
+                                        continue
+                            except Exception:
+                                pass  # thinking 检测失败，假设内容已出现
+                            
                             new_message_found = True
                             self._log(f"ask: new message content detected via index {target_index} (len={len(current_text)})")
                             break
@@ -350,7 +384,13 @@ class ChatGPTWaiter:
                         self._log(f"ask: _get_assistant_text_by_index({target_index}) error: {e}")
                     
                     if time.time() - hb >= 5:
-                        self._log(f"ask: still waiting for new message content (index {target_index})... (elapsed={elapsed:.1f}s/{timeout_s}s)")
+                        # 在日志中显示 thinking 状态
+                        try:
+                            thinking_status = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
+                            thinking_str = "thinking" if thinking_status else "not thinking"
+                        except Exception:
+                            thinking_str = "unknown"
+                        self._log(f"ask: still waiting for new message content (index {target_index}, {thinking_str})... (elapsed={elapsed:.1f}s/{timeout_s}s)")
                         hb = time.time()
                     # 优化：减少等待间隔，从0.3秒减少到0.2秒，加快检测速度
                     await asyncio.sleep(0.2)
@@ -365,8 +405,17 @@ class ChatGPTWaiter:
             except Exception:
                 pass
         
+        # 关键修复：在返回之前，最后检查一次 thinking 状态
+        # 如果还在 thinking 状态，即使没有找到内容，也应该继续等待（在稳定化阶段处理）
         if not new_message_found:
-            self._log("ask: warning: new message content not confirmed, but continuing...")
+            try:
+                thinking_final = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                if thinking_final:
+                    self._log("ask: warning: new message content not confirmed, but detected thinking mode - will continue waiting in stabilize phase")
+                else:
+                    self._log("ask: warning: new message content not confirmed, but continuing...")
+            except Exception:
+                self._log("ask: warning: new message content not confirmed, but continuing...")
         self._log(f"ask: content wait done ({time.time()-t2:.2f}s)")
         return new_message_found
 
@@ -394,6 +443,7 @@ class ChatGPTWaiter:
         last_text_hash = ""
         last_change = time.time()
         hb = time.time()
+        thinking_log_hb = time.time()  # 用于控制 thinking 模式下的日志频率
         # 用于检测文本是否在增长
         last_text_len_history = []
         # 标记是否已经拉取过完整文本（用于最终返回）
@@ -406,6 +456,53 @@ class ChatGPTWaiter:
             
             if remaining <= 0:
                 break
+            
+            # 关键修复：在每次循环开始时，优先检查 thinking 状态
+            # 这样可以更早地检测到 thinking 状态，避免在 thinking 模式下过早返回
+            try:
+                thinking = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+            except Exception:
+                thinking = False
+            
+            if thinking:
+                # 思考状态下，即使内容没有变化，也要继续等待
+                # 重置 last_change，避免过早认为稳定
+                last_change = time.time()
+                # 获取当前内容长度用于日志
+                try:
+                    n_assist_current = await self._assistant_count()
+                    if n_assist_current > n_assist0:
+                        target_index = n_assist_current - 1
+                    else:
+                        target_index = max(0, n_assist_current - 1)
+                    combined_sel = ", ".join(self.ASSISTANT_MSG)
+                    result = await self.page.evaluate(
+                        """(args) => {
+                            const sel = args.sel;
+                            const idx = args.idx;
+                            const els = document.querySelectorAll(sel);
+                            if (idx < 0 || idx >= els.length) return {len: 0};
+                            const el = els[idx];
+                            const text = (el.innerText || el.textContent || '').trim();
+                            return {len: text.length};
+                        }""",
+                        {"sel": combined_sel, "idx": target_index}
+                    )
+                    current_len = result.get("len", 0) if isinstance(result, dict) else 0
+                except Exception:
+                    current_len = 0
+                
+                # 控制日志频率：每 3 秒打印一次，避免日志过于频繁
+                if time.time() - thinking_log_hb >= 3.0:
+                    self._log(f"ask: ChatGPT Pro 还在思考中，继续等待（len={current_len}, remaining={remaining:.1f}s）")
+                    thinking_log_hb = time.time()
+                
+                # 如果内容长度为0或很短，可能是思考占位符，等待更长时间
+                if current_len == 0 or current_len < 100:
+                    await asyncio.sleep(0.5)  # 思考模式下等待更长时间
+                else:
+                    await asyncio.sleep(0.3)
+                continue
                 
             try:
                 # P1优化：在浏览器侧只返回长度和哈希，不传输完整文本
@@ -457,20 +554,19 @@ class ChatGPTWaiter:
                     except Exception:
                         generating = False
                     
-                    # 关键修复：检查 ChatGPT Pro 是否还在思考中
-                    # 思考模式下，即使 generating=False 且内容没有变化，也不代表处理完成
+                    # 再次检查 thinking 状态（双重保险，防止在检查内容时状态变化）
                     try:
-                        thinking = await asyncio.wait_for(self._is_thinking(), timeout=0.5)
+                        thinking_check = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
+                        if thinking_check:
+                            # 控制日志频率：每 3 秒打印一次
+                            if time.time() - thinking_log_hb >= 3.0:
+                                self._log(f"ask: ChatGPT Pro 还在思考中（内容检查后），继续等待（len={current_len}, remaining={remaining:.1f}s）")
+                                thinking_log_hb = time.time()
+                            last_change = time.time()
+                            await asyncio.sleep(0.3)
+                            continue
                     except Exception:
-                        thinking = False
-                    
-                    if thinking:
-                        self._log(f"ask: ChatGPT Pro 还在思考中，继续等待（len={current_len}, remaining={remaining:.1f}s）")
-                        # 思考状态下，即使内容没有变化，也要继续等待
-                        # 重置 last_change，避免过早认为稳定
-                        last_change = time.time()
-                        await asyncio.sleep(0.3)
-                        continue
+                        pass  # thinking 检测失败不影响继续
                     
                     # 补充逻辑：如果文本长度在增加，强制认为 generating=True
                     if not generating and current_len > 0:
@@ -483,9 +579,25 @@ class ChatGPTWaiter:
                                 self._log(f"ask: text growing ({prev_len}->{current_len}), forcing generating=True")
                     
                     # 如果还在等待首字，保持高频检查
-                    if current_len == 0 and not generating:
-                        await asyncio.sleep(0.2)
-                        continue
+                    # 关键修复：如果内容长度为0，也要检查 thinking 状态
+                    if current_len == 0:
+                        # 再次检查 thinking 状态（内容为空时可能还在思考）
+                        try:
+                            thinking_empty = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
+                            if thinking_empty:
+                                # 控制日志频率：每 3 秒打印一次
+                                if time.time() - thinking_log_hb >= 3.0:
+                                    self._log(f"ask: content empty but still thinking, continuing to wait (remaining={remaining:.1f}s)")
+                                    thinking_log_hb = time.time()
+                                last_change = time.time()
+                                await asyncio.sleep(0.5)  # 思考模式下等待更长时间
+                                continue
+                        except Exception:
+                            pass  # thinking 检测失败不影响继续
+                        
+                        if not generating:
+                            await asyncio.sleep(0.2)
+                            continue
                     
                     # 关键优化：如果内容长度长时间不变（>30秒），即使generating=True，也应该认为已经稳定
                     # 这可以避免_is_generating()误判导致的长时间等待

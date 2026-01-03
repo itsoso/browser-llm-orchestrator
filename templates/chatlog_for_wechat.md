@@ -15,6 +15,7 @@
 
 ---
 type: weekly_review
+create: {{current_date}}
 group: {{group_yq}}
 week: {{week}}
 period_start: {{period_start}}

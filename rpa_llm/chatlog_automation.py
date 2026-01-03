@@ -10,7 +10,7 @@ import asyncio
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import yaml
 
@@ -21,6 +21,43 @@ from .chatlog_cli import analyze_chatlog_conversations
 from .driver_client import run_task as driver_run_task
 from .utils import beijing_now_iso, ensure_dir, clean_text_code_block
 from .vault import write_markdown
+
+
+def get_week_dates(year: int, week: int) -> Tuple[datetime, datetime]:
+    """
+    获取指定年份和周数的日期范围（周一到周日）
+    
+    Args:
+        year: 年份
+        week: 周数（1-53）
+    
+    Returns:
+        (start_date, end_date) 元组，start_date 是周一，end_date 是周日
+    """
+    # 找到该年份的第一天
+    year_start = datetime(year, 1, 1)
+    # 找到该年份第一天是星期几（0=周一, 6=周日）
+    year_start_weekday = year_start.weekday()
+    
+    # 计算第一周的周一日期
+    days_to_first_monday = (7 - year_start_weekday) % 7
+    if days_to_first_monday == 0:
+        days_to_first_monday = 7
+    
+    first_monday = year_start + timedelta(days=days_to_first_monday - 1)
+    
+    # 计算目标周的周一
+    target_monday = first_monday + timedelta(weeks=week - 1)
+    
+    # 该周的周日
+    target_sunday = target_monday + timedelta(days=6)
+    
+    # 确保不超过该年的最后一天
+    year_end = datetime(year, 12, 31)
+    if target_sunday > year_end:
+        target_sunday = year_end
+    
+    return target_monday, target_sunday
 
 
 def get_week_number(date: datetime) -> int:
@@ -257,6 +294,9 @@ async def load_template_and_generate_prompt(
     raw_note = str(raw_file_path) if raw_file_path else ""
     
     # 先替换 {{}} 格式的占位符（模板格式）
+    # 生成当前日期时间（用于 Obsidian 的 created 字段）
+    current_date = beijing_now_iso()
+    
     replacements = {
         "{{group_yq}}": talker,
         "{{group}}": talker,
@@ -267,6 +307,7 @@ async def load_template_and_generate_prompt(
         "{{period_end_dot}}": period_end_dot,
         "{{raw_note}}": raw_note,
         "{{conversation_content}}": raw_content,
+        "{{current_date}}": current_date,
     }
     
     # 记录替换前的状态
@@ -314,6 +355,7 @@ async def load_template_and_generate_prompt(
                 period_start_dot=period_start_dot,
                 period_end_dot=period_end_dot,
                 raw_note=raw_note,
+                current_date=current_date,  # 添加 current_date 支持
             )
         else:
             prompt = template
