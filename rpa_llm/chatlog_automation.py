@@ -349,6 +349,7 @@ async def save_summary_file(
     start: datetime,
     end: datetime,
     model_version: str = "5.2pro",
+    skip_frontmatter: bool = False,
 ) -> Path:
     """
     保存 summary 文件
@@ -384,7 +385,8 @@ async def save_summary_file(
             "week": week,
             "model_version": model_version,
         },
-        summary_content
+        summary_content,
+        skip_frontmatter=skip_frontmatter,
     )
     
     print(f"[{beijing_now_iso()}] [automation] ✓ Summary 文件已保存: {summary_path}")
@@ -579,7 +581,13 @@ async def run_automation(
         
         # 步骤 5: 保存 summary 文件
         summary_path = await save_summary_file(
-            answer, base_path, talker, start, end, model_version
+            answer,
+            base_path,
+            talker,
+            start,
+            end,
+            model_version,
+            skip_frontmatter=bool(template_path),
         )
         
         print(f"[{beijing_now_iso()}] [automation] ✓ 自动化流程完成 (request_id={request_id})")
@@ -758,4 +766,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

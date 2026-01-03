@@ -10,6 +10,7 @@ llm:
   arbitrator_site: "chatgpt"  # 可选: chatgpt, gemini
   model_version: "5.2pro"  # 用于文件名，不影响实际模型选择
   task_timeout_s: 1200  # 超时时间（秒），默认 600（10分钟），Pro 版本建议 1200（20分钟）或更长
+  new_chat: true  # 每次提交都打开新窗口
 
 # ChatGPT 模型变体（通过环境变量设置）
 # export CHATGPT_VARIANT=pro  # 可选: pro, thinking, instant

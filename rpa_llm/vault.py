@@ -21,8 +21,18 @@ def _yaml_list(values: List[str]) -> str:
     return "\n".join(lines)
 
 
-def write_markdown(path: Path, frontmatter: Dict[str, Any], body: str) -> None:
+def write_markdown(
+    path: Path,
+    frontmatter: Dict[str, Any],
+    body: str,
+    skip_frontmatter: bool = False,
+) -> None:
     ensure_dir(path.parent)
+    if skip_frontmatter:
+        content = body.strip() + "\n"
+        path.write_text(content, encoding="utf-8")
+        return
+
     fm_lines = ["---"]
     for k, v in frontmatter.items():
         if isinstance(v, list):
