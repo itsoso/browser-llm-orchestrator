@@ -1048,15 +1048,23 @@ class ChatGPTAdapter(SiteAdapter):
         获取最后一条 assistant 消息的文本。
         修复：添加显式超时，避免默认 30 秒超时导致 Future exception was never retrieved。
         """
+        errors = []
         for sel in self.ASSISTANT_MSG:
             loc = self.page.locator(sel)
             try:
                 cnt = await loc.count()
                 if cnt > 0:
                     # 修复：使用显式超时（2秒），避免默认 30 秒超时导致 Future exception
-                    return (await loc.nth(cnt - 1).inner_text(timeout=2000)).strip()
-            except Exception:
+                    text = await loc.nth(cnt - 1).inner_text(timeout=2000)
+                    if text:
+                        return text.strip()
+            except Exception as e:
+                errors.append(f"{sel}: {e}")
                 continue
+        
+        # 如果所有选择器都失败，记录日志
+        if errors:
+            self._log(f"_last_assistant_text: failed to get text, errors={errors[:3]}")
         return ""
     
     async def _get_assistant_text_by_index(self, index: int) -> str:
@@ -1073,8 +1081,10 @@ class ChatGPTAdapter(SiteAdapter):
             消息文本，如果获取失败返回空字符串
         """
         if index < 0:
+            self._log(f"_get_assistant_text_by_index: invalid index={index}")
             return ""
         
+        errors = []
         for sel in self.ASSISTANT_MSG:
             loc = self.page.locator(sel)
             try:
@@ -1084,8 +1094,13 @@ class ChatGPTAdapter(SiteAdapter):
                     text = await loc.nth(index).inner_text(timeout=2000)
                     if text:
                         return text.strip()
-            except Exception:
+            except Exception as e:
+                errors.append(f"{sel}: {e}")
                 continue
+        
+        # 如果所有选择器都失败，记录日志
+        if errors:
+            self._log(f"_get_assistant_text_by_index: failed for index={index}, errors={errors[:3]}")
         return ""
 
     async def _is_generating(self) -> bool:

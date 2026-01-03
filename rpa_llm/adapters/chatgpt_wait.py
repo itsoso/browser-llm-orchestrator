@@ -632,18 +632,22 @@ class ChatGPTWaiter:
                         if not final_text_fetched:
                             try:
                                 if n_assist_current > n_assist0:
+                                    self._log(f"ask: fetching final_text via index {target_index} (30s force)...")
                                     final_text = await asyncio.wait_for(
                                         self._get_assistant_text_by_index(target_index),
                                         timeout=2.0
                                     )
                                 else:
+                                    self._log("ask: fetching final_text via _last_assistant_text (30s force)...")
                                     final_text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
                                 final_text_fetched = True
-                            except Exception:
+                                self._log(f"ask: final_text fetched successfully (len={len(final_text) if final_text else 0})")
+                            except Exception as fetch_err:
+                                self._log(f"ask: ERROR fetching final_text (30s force): {fetch_err}")
                                 final_text = ""  # 如果拉取失败，返回空字符串
                         
                         elapsed = time.time() - ask_start_time
-                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s, content unchanged for {time_since_change:.1f}s, len={current_len})")
+                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s, content unchanged for {time_since_change:.1f}s, len={current_len}, final_text_len={len(final_text) if final_text else 0})")
                         return final_text, self.page.url
                     
                     # 快速路径：如果 generating=False 且文本长度在 0.5 秒内没有变化，直接认为稳定
@@ -653,18 +657,22 @@ class ChatGPTWaiter:
                         if not final_text_fetched:
                             try:
                                 if n_assist_current > n_assist0:
+                                    self._log(f"ask: fetching final_text via index {target_index}...")
                                     final_text = await asyncio.wait_for(
                                         self._get_assistant_text_by_index(target_index),
                                         timeout=2.0
                                     )
                                 else:
+                                    self._log("ask: fetching final_text via _last_assistant_text...")
                                     final_text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
                                 final_text_fetched = True
-                            except Exception:
+                                self._log(f"ask: final_text fetched successfully (len={len(final_text) if final_text else 0})")
+                            except Exception as fetch_err:
+                                self._log(f"ask: ERROR fetching final_text: {fetch_err}")
                                 final_text = ""  # 如果拉取失败，返回空字符串
                         
                         elapsed = time.time() - ask_start_time
-                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s, fast path: {time_since_change:.1f}s no change, len={current_len})")
+                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s, fast path: {time_since_change:.1f}s no change, len={current_len}, final_text_len={len(final_text) if final_text else 0})")
                         return final_text, self.page.url
                     
                     # 原有逻辑：稳定时间达到且不在生成
@@ -674,18 +682,22 @@ class ChatGPTWaiter:
                         if not final_text_fetched:
                             try:
                                 if n_assist_current > n_assist0:
+                                    self._log(f"ask: fetching final_text via index {target_index} (normal path)...")
                                     final_text = await asyncio.wait_for(
                                         self._get_assistant_text_by_index(target_index),
                                         timeout=2.0
                                     )
                                 else:
+                                    self._log("ask: fetching final_text via _last_assistant_text (normal path)...")
                                     final_text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
                                 final_text_fetched = True
-                            except Exception:
+                                self._log(f"ask: final_text fetched successfully (len={len(final_text) if final_text else 0})")
+                            except Exception as fetch_err:
+                                self._log(f"ask: ERROR fetching final_text (normal path): {fetch_err}")
                                 final_text = ""  # 如果拉取失败，返回空字符串
                         
                         elapsed = time.time() - ask_start_time
-                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s, len={current_len})")
+                        self._log(f"ask: done (stabilized, total={elapsed:.1f}s, len={current_len}, final_text_len={len(final_text) if final_text else 0})")
                         return final_text, self.page.url
             except asyncio.TimeoutError:
                 # DOM 查询超时，继续等待
@@ -720,9 +732,12 @@ class ChatGPTWaiter:
         await self.save_artifacts("answer_timeout")
         final_text = ""
         try:
+            self._log("ask: timeout - attempting to fetch partial answer...")
             final_text = await asyncio.wait_for(self._last_assistant_text(), timeout=2.0)
-        except:
-            pass
+            self._log(f"ask: timeout - partial answer fetched (len={len(final_text) if final_text else 0})")
+        except Exception as timeout_fetch_err:
+            self._log(f"ask: timeout - failed to fetch partial answer: {timeout_fetch_err}")
+            final_text = ""
         
         if final_text:
             self._log(f"ask: timeout but got partial answer (len={len(final_text)}, elapsed={elapsed:.1f}s)")
