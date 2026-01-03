@@ -25,7 +25,7 @@ from .vault import (
     make_model_output_filename,
     model_output_note_body,
 )
-from .utils import utc_now_iso, beijing_now_iso, slugify
+from .utils import utc_now_iso, beijing_now_iso, slugify, clean_text_code_block
 from .driver_client import run_task as driver_run_task
 
 
@@ -186,6 +186,7 @@ async def analyze_chatlog_conversations(
                         )
                         ok = bool(payload.get("ok"))
                         answer = payload.get("answer") or ""
+                        # 保留 LLM 的原始返回结果，不在这里清理
                         url = payload.get("url") or ""
                         err = payload.get("error")
                         
@@ -219,6 +220,9 @@ async def analyze_chatlog_conversations(
                         all_results.append(result)
                         
                         # 保存到 Obsidian
+                        # 在写入 Obsidian 之前清理代码块标记，确保内容能正常渲染
+                        # 这样保留 LLM 的原始返回结果，只在最终写入时处理
+                        cleaned_answer = clean_text_code_block(answer)
                         fname = make_model_output_filename(task.topic, task.stream_id, task.site_id)
                         out_path = vault_paths["model"] / fname
                         write_markdown(
@@ -232,7 +236,7 @@ async def analyze_chatlog_conversations(
                                 "url": url,
                                 "tags": tags[:12],
                             },
-                            model_output_note_body(task.prompt, answer)
+                            model_output_note_body(task.prompt, cleaned_answer)
                         )
                         print(f"[{beijing_now_iso()}] [chatlog] ✓ {task.site_id} 分析完成: {conv_title}")
                     except Exception as e:
@@ -285,6 +289,7 @@ async def analyze_chatlog_conversations(
                         )
                         ok = bool(payload.get("ok"))
                         answer = payload.get("answer") or ""
+                        # 保留 LLM 的原始返回结果，不在这里清理
                         url = payload.get("url") or ""
                         err = payload.get("error")
                         
@@ -294,6 +299,9 @@ async def analyze_chatlog_conversations(
                         raise RuntimeError("未提供 driver_url，无法执行 synthesis")
                     
                     # 保存 synthesis 结果
+                    # 在写入 Obsidian 之前清理代码块标记，确保内容能正常渲染
+                    # 这样保留 LLM 的原始返回结果，只在最终写入时处理
+                    cleaned_answer = clean_text_code_block(answer)
                     topic_slug = slugify(conv_title, max_len=40)
                     final_path = vault_paths["final"] / f"final__{arbitrator_site}__{topic_slug}.md"
                     write_markdown(
@@ -307,7 +315,7 @@ async def analyze_chatlog_conversations(
                             "url": url,
                             "tags": tags[:12],
                         },
-                        answer
+                        cleaned_answer
                     )
                     
                     print(f"[{beijing_now_iso()}] [chatlog] ✓ synthesis 完成，结果保存到: {final_path}")

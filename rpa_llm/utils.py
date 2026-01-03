@@ -45,3 +45,59 @@ def first_nonempty(items: Iterable[Optional[str]]) -> Optional[str]:
         if x:
             return x
     return None
+
+
+def clean_text_code_block(content: str) -> str:
+    """
+    清理内容中最开头和最后结尾的 ```text 代码块标记，确保内容能在 Obsidian 中正常渲染
+    
+    如果 LLM 按照模板要求将内容放到 ```text 代码块中，此函数会：
+    1. 只删除字符串最开头的 ```text 标记（支持 ```text、``` text、```TEXT 等变体）
+    2. 只删除字符串最后结尾的 ``` 标记
+    3. 删除常见的残留模式（如 "text\n复制代码\n"）
+    4. 去除首尾空白字符
+    5. 保留内容中间的所有 markdown 格式（包括代码块）
+    
+    Args:
+        content: 可能包含 ```text 代码块的内容
+    
+    Returns:
+        清理后的内容（只去除最外层代码块标记和常见残留，保留所有中间内容）
+    
+    Examples:
+        >>> clean_text_code_block('```text\\ncontent\\n```')
+        'content'
+        >>> clean_text_code_block('```text\\n---\\ntype: test\\n---\\ncontent\\n```')
+        '---\\ntype: test\\n---\\ncontent'
+        >>> clean_text_code_block('```text\\ntext\\n复制代码\\n---\\ntype: test\\n---\\n```')
+        '---\\ntype: test\\n---'
+        >>> clean_text_code_block('```text\\n```python\\ncode\\n```\\n```')
+        '```python\\ncode\\n```'
+        >>> clean_text_code_block('content')
+        'content'
+    """
+    if not content:
+        return content
+    
+    # 只匹配字符串最开头的 ```text 标记（不使用 MULTILINE，确保只匹配开头）
+    # 支持多种变体：```text、```text\n、``` text、``` text\n
+    # 使用 ^ 锚点确保只匹配字符串开头，不区分大小写
+    content = re.sub(r'^```\s*text\s*\n?', '', content, flags=re.IGNORECASE)
+    
+    # 只匹配字符串最后结尾的 ``` 标记（不使用 MULTILINE，确保只匹配结尾）
+    # 匹配结尾的代码块标记（可能前面有换行，后面可能有空白字符）
+    # 使用 $ 锚点确保只匹配字符串结尾
+    content = re.sub(r'\n?```\s*$', '', content)
+    
+    # 删除常见的残留模式（LLM 可能在代码块内添加了这些内容）
+    # 只删除开头的残留，不影响中间内容
+    # 匹配 "text\n复制代码\n" 或 "text\n复制代码" 等变体（这是 ChatGPT 常见的残留）
+    content = re.sub(r'^text\s*\n\s*复制代码\s*\n?', '', content, flags=re.IGNORECASE)
+    # 如果开头是 "text\n" 且后面是 frontmatter（---），也删除（可能是残留）
+    if content.startswith('text\n---'):
+        content = re.sub(r'^text\s*\n', '', content)
+    
+    # 去除开头和结尾的空白字符
+    content = content.strip()
+    
+    return content

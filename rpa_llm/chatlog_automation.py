@@ -19,7 +19,7 @@ import re
 from .chatlog_client import ChatlogClient
 from .chatlog_cli import analyze_chatlog_conversations
 from .driver_client import run_task as driver_run_task
-from .utils import beijing_now_iso, ensure_dir
+from .utils import beijing_now_iso, ensure_dir, clean_text_code_block
 from .vault import write_markdown
 
 
@@ -355,7 +355,7 @@ async def save_summary_file(
     保存 summary 文件
     
     Args:
-        summary_content: LLM 生成的摘要内容
+        summary_content: LLM 生成的摘要内容（原始结果，未清理）
         base_path: 基础路径
         talker: 聊天对象
         start: 开始日期
@@ -374,6 +374,10 @@ async def save_summary_file(
     filename = f"{talker} 第{week}周-{date_range_str}-Sum-{normalized_model_version}.md"
     summary_path = paths["dir"] / filename
     
+    # 在写入 Obsidian 之前清理代码块标记，确保内容能正常渲染
+    # 这样保留 LLM 的原始返回结果，只在最终写入时处理
+    cleaned_content = clean_text_code_block(summary_content)
+    
     # 保存 summary 文件
     write_markdown(
         summary_path,
@@ -385,7 +389,7 @@ async def save_summary_file(
             "week": week,
             "model_version": model_version,
         },
-        summary_content,
+        cleaned_content,
         skip_frontmatter=skip_frontmatter,
     )
     
@@ -537,6 +541,7 @@ async def run_automation(
         
         ok = bool(payload.get("ok"))
         answer = payload.get("answer") or ""
+        # 保留 LLM 的原始返回结果，不在这里清理
         url = payload.get("url") or ""
         err = payload.get("error")
         http_status = payload.get("http_status")
