@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import signal
 import time
 from dataclasses import dataclass
@@ -213,6 +214,12 @@ class DriverServer:
                 timeout_s = int(payload.get("timeout_s", 1200))
                 model_version = payload.get("model_version")  # 可选的模型版本参数
                 new_chat = payload.get("new_chat", False)  # 是否新开窗口
+                auto_mode = payload.get("auto_mode", False)  # 是否自动模式（批量处理时不等待用户输入）
+                
+                # 关键修复：如果是批量处理模式（new_chat=True 或 auto_mode=True），设置环境变量
+                # 这样 manual_checkpoint 会自动抛出异常而不是等待用户输入
+                if auto_mode or new_chat:
+                    os.environ["RPA_AUTO_MODE"] = "1"
                 if not site_id or not prompt:
                     await self._write_json(writer, 400, {"ok": False, "error": "missing site_id or prompt"})
                     return
