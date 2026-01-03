@@ -91,6 +91,16 @@ class GeminiAdapter(SiteAdapter):
         'button:has-text("开始")',
     ]
 
+    # Model picker button (模型选择器按钮)
+    MODEL_PICKER_BTN = [
+        'button[aria-label*="Model"]',
+        'button[aria-label*="模型"]',
+        'button[aria-label*="Switch model"]',
+        'button[aria-label*="切换模型"]',
+        '[data-testid*="model-picker"]',
+        'button:has-text("Gemini")',  # 按钮上通常显示当前模型名
+    ]
+
     # ===== Tunables =====
     # Keep send attempts short; long waits should happen in response wait, not send.
     # P1优化：减少发送硬限制时间，从 8.0 秒减少到 5.0 秒，加快发送速度
@@ -105,6 +115,10 @@ class GeminiAdapter(SiteAdapter):
     STABLE_SECONDS = float(os.environ.get("GEMINI_STABLE_SECONDS", "1.2"))
     POLL_INTERVAL_S = float(os.environ.get("GEMINI_POLL_INTERVAL_S", "0.35"))
 
+    # 模型版本相关
+    _model_version: Optional[str] = None
+    _variant_set: bool = False
+
     def _log(self, msg: str) -> None:
         print(f"[{beijing_now_iso()}] [{self.site_id}] {msg}", flush=True)
 
@@ -114,6 +128,162 @@ class GeminiAdapter(SiteAdapter):
 
     def _new_chat_enabled(self) -> bool:
         return (os.environ.get("GEMINI_NEW_CHAT") or "0").strip() == "1"
+
+    def _desired_variant(self) -> str:
+        """
+        确定所需的 Gemini 模型变体
+        
+        返回:
+            "pro": Gemini Pro (更强大，但更慢)
+            "flash": Gemini Flash (快速，默认)
+        """
+        # 优先使用实例变量（从 ask 方法传入），其次使用环境变量
+        if self._model_version:
+            v = self._model_version.strip().lower()
+            if "pro" in v:
+                return "pro"
+            if "flash" in v or "fast" in v:
+                return "flash"
+            # 默认返回 flash
+            return "flash"
+        
+        # GEMINI_VARIANT=flash|pro
+        v = (os.environ.get("GEMINI_VARIANT") or "flash").strip().lower()
+        if "pro" in v:
+            return "pro"
+        return "flash"
+
+    async def ensure_variant(self, model_version: Optional[str] = None) -> None:
+        """
+        设置 Gemini 模型版本（best-effort，只设置一次）
+        
+        Args:
+            model_version: 模型版本字符串（如 "pro", "flash", "2.0-pro", "2.0-flash"）
+                          如果提供，会优先使用此参数
+        
+        Gemini 支持的模型:
+        - Gemini 2.0 Flash (默认，快速)
+        - Gemini 2.0 Pro (专业，更强大但更慢)
+        - Gemini 1.5 Flash
+        - Gemini 1.5 Pro
+        """
+        if self._variant_set and not model_version:
+            return
+        
+        # 如果提供了 model_version 参数，临时设置到实例变量
+        if model_version:
+            self._model_version = model_version
+            self._variant_set = False  # 允许重新设置
+        
+        v = self._desired_variant()
+        self._log(f"mode: desired={v}, model_version={model_version or self._model_version or 'env'}")
+
+        # 尝试打开模型选择器
+        opened = False
+        self._log(f"mode: trying to open model picker for variant={v}")
+        for sel in self.MODEL_PICKER_BTN:
+            try:
+                btn = self.page.locator(sel).first
+                btn_count = await btn.count()
+                if btn_count > 0:
+                    is_visible = await btn.is_visible()
+                    self._log(f"mode: found button '{sel}' (count={btn_count}, visible={is_visible})")
+                    if is_visible:
+                        await btn.click()
+                        await asyncio.sleep(0.8)
+                        opened = True
+                        self._log(f"mode: clicked model picker button '{sel}'")
+                        break
+            except Exception as e:
+                self._log(f"mode: button '{sel}' failed: {e}")
+                continue
+
+        if not opened:
+            self._log("mode: model picker not found; skip (using default model)")
+            self._variant_set = True
+            return
+
+        # 构建匹配模式
+        # Gemini 菜单选项通常是：
+        # - "2.0 Flash" / "Gemini 2.0 Flash"
+        # - "2.0 Pro" / "Gemini 2.0 Pro"
+        # - "1.5 Flash" / "Gemini 1.5 Flash"
+        # - "1.5 Pro" / "Gemini 1.5 Pro"
+        import re
+        if v == "pro":
+            # 匹配 Pro 模型（优先选择最新版本）
+            pattern = re.compile(r"\bPro\b|专业", re.I)
+        else:
+            # 匹配 Flash 模型（默认，优先选择最新版本）
+            pattern = re.compile(r"\bFlash\b|快速", re.I)
+        
+        ok = await self._select_model_menu_item(pattern, v)
+        if not ok:
+            self._log(f"mode: cannot auto-select model (variant={v}); skip")
+        else:
+            self._log(f"mode: successfully selected model (variant={v})")
+        
+        self._variant_set = True
+
+    async def _select_model_menu_item(self, pattern, variant: str) -> bool:
+        """
+        从下拉菜单中选择模型
+        
+        Args:
+            pattern: 用于匹配模型名称的正则表达式
+            variant: 目标变体 ("pro" 或 "flash")
+        
+        Returns:
+            是否成功选择模型
+        """
+        import re
+        
+        candidates = [
+            self.page.get_by_role("menuitem"),
+            self.page.get_by_role("option"),
+            self.page.locator("div[role='menuitem']"),
+            self.page.locator("button"),
+            self.page.locator("div[role='option']"),
+        ]
+        
+        # 调试：记录所有看到的菜单项
+        all_items_seen = []
+        
+        for c in candidates:
+            try:
+                cnt = await c.count()
+                if cnt > 0:
+                    self._log(f"mode: checking candidate with {cnt} items")
+            except Exception:
+                continue
+            
+            for i in range(min(cnt, 30)):
+                try:
+                    item = c.nth(i)
+                    txt = (await item.inner_text()).strip()
+                    if not txt:
+                        continue
+                    
+                    # 记录看到的菜单项（前40个字符）
+                    txt_short = txt[:40].replace('\n', ' ')
+                    all_items_seen.append(txt_short)
+                    
+                    # 匹配模式
+                    if pattern.search(txt):
+                        self._log(f"mode: selecting model '{txt_short}' (matched)")
+                        await item.click()
+                        await asyncio.sleep(0.6)
+                        return True
+                except Exception:
+                    continue
+        
+        # 如果没有找到匹配的模型，记录所有看到的菜单项以便调试
+        if all_items_seen:
+            self._log(f"mode: no match found. Seen items: {all_items_seen[:10]}")
+        else:
+            self._log("mode: no menu items found (picker may not have opened)")
+        
+        return False
 
     # ===== Basic helpers =====
 
@@ -1186,16 +1356,34 @@ class GeminiAdapter(SiteAdapter):
 
         raise RuntimeError("send not accepted (Enter/click/js_click)")
 
-    async def ask(self, prompt: str, timeout_s: int = 180) -> Tuple[str, str]:
+    async def ask(self, prompt: str, timeout_s: int = 180, model_version: Optional[str] = None, new_chat: bool = False) -> Tuple[str, str]:
         """
         Send prompt and wait for final answer.
+        
+        Args:
+            prompt: 要发送的提示词
+            timeout_s: 超时时间（秒）
+            model_version: 模型版本（可选）。支持 "pro", "flash", "2.0-pro", "2.0-flash" 等
+            new_chat: 是否打开新聊天窗口（需要设置 GEMINI_NEW_CHAT=1 环境变量）
+        
         Returns: (answer_text, url)
         """
         prompt = self.clean_newlines(prompt, logger=lambda m: self._log(f"ask: {m}"))
 
-        self._log(f"ask: start (timeout={timeout_s}s)")
+        self._log(f"ask: start (timeout={timeout_s}s, model_version={model_version or 'default'})")
         await self.ensure_ready()
+        
+        # 设置模型版本（best-effort）
+        await self.ensure_variant(model_version)
+        
+        # 如果需要，打开新聊天窗口
+        if new_chat:
+            # 临时启用 new_chat
+            os.environ["GEMINI_NEW_CHAT"] = "1"
         await self.new_chat()
+        if new_chat:
+            # 恢复原设置
+            os.environ.pop("GEMINI_NEW_CHAT", None)
 
         await self._dismiss_popups()
 

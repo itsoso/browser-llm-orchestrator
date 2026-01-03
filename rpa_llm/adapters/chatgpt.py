@@ -485,16 +485,21 @@ class ChatGPTAdapter(SiteAdapter):
             else:
                 # 2. 部分匹配（通用匹配）
                 version_parts = []
-                if "5.2" in model_version_lower or "5-2" in model_version_lower:
-                    version_parts.append(r"5[.\-]?2")
+                # 根据日志分析，ChatGPT 菜单选项格式如下：
+                # - "Instant 即刻回答"
+                # - "Pro 研究级智能模型"
+                # - "Thinking 思考更充分，回答更优质"
+                # - "Auto 自动决定思考时长"
+                if "instant" in model_version_lower:
+                    version_parts.append(r"\bInstant\b|即刻")
+                if "pro" in model_version_lower:
+                    version_parts.append(r"\bPro\b|研究级")
+                if "thinking" in model_version_lower:
+                    version_parts.append(r"\bThinking\b|思考更充分")
+                if "auto" in model_version_lower:
+                    version_parts.append(r"\bAuto\b|自动")
                 if "4o" in model_version_lower or "4-o" in model_version_lower:
                     version_parts.append(r"4[.\-]?o")
-                if "instant" in model_version_lower:
-                    version_parts.append(r"\binstant\b|即时|Instant")
-                if "pro" in model_version_lower:
-                    version_parts.append(r"\bpro\b|专业|Professional")
-                if "gpt" in model_version_lower:
-                    version_parts.append(r"gpt")
                 
                 # 如果有关键部分，使用更精确的模式
                 if version_parts:
@@ -504,9 +509,13 @@ class ChatGPTAdapter(SiteAdapter):
         else:
             enhanced_pattern = pattern
         
+        # 调试：记录所有看到的菜单项
+        all_items_seen = []
+        
         for c in candidates:
             try:
                 cnt = await c.count()
+                self._log(f"mode: checking candidate with {cnt} items")
             except Exception:
                 continue
             for i in range(min(cnt, 60)):
@@ -516,21 +525,32 @@ class ChatGPTAdapter(SiteAdapter):
                     if not txt:
                         continue
                     
+                    # 记录看到的菜单项（前30个字符）
+                    txt_short = txt[:30].replace('\n', ' ')
+                    all_items_seen.append(txt_short)
+                    
                     # 优先使用增强模式匹配
                     if model_version and enhanced_pattern.search(txt):
-                        self._log(f"mode: selecting model '{txt}' (matched by enhanced pattern)")
+                        self._log(f"mode: selecting model '{txt_short}' (matched by enhanced pattern)")
                         await item.click()
                         await asyncio.sleep(0.6)
                         return True
                     
                     # 回退到原始模式匹配
                     if pattern.search(txt):
-                        self._log(f"mode: selecting model '{txt}' (matched by default pattern)")
+                        self._log(f"mode: selecting model '{txt_short}' (matched by default pattern)")
                         await item.click()
                         await asyncio.sleep(0.6)
                         return True
                 except Exception:
                     continue
+        
+        # 如果没有找到匹配的模型，记录所有看到的菜单项以便调试
+        if all_items_seen:
+            self._log(f"mode: no match found. Seen items: {all_items_seen[:10]}")
+        else:
+            self._log("mode: no menu items found (picker may not have opened)")
+        
         return False
 
     async def ensure_variant(self, model_version: Optional[str] = None) -> None:
@@ -573,15 +593,22 @@ class ChatGPTAdapter(SiteAdapter):
         # 或者明确指定了 model_version 且不是 thinking/instant
         if v in ("pro", "custom") or (model_version and model_version.lower() not in ("thinking", "instant")):
             opened = False
+            self._log(f"mode: trying to open model picker for variant={v}, model_version={model_version}")
             for sel in self.MODEL_PICKER_BTN:
                 try:
                     btn = self.page.locator(sel).first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        await btn.click()
-                        await asyncio.sleep(0.5)
-                        opened = True
-                        break
-                except Exception:
+                    btn_count = await btn.count()
+                    if btn_count > 0:
+                        is_visible = await btn.is_visible()
+                        self._log(f"mode: found button '{sel}' (count={btn_count}, visible={is_visible})")
+                        if is_visible:
+                            await btn.click()
+                            await asyncio.sleep(0.8)  # 增加等待时间，确保菜单打开
+                            opened = True
+                            self._log(f"mode: clicked model picker button '{sel}'")
+                            break
+                except Exception as e:
+                    self._log(f"mode: button '{sel}' failed: {e}")
                     continue
 
             if not opened:
@@ -595,25 +622,38 @@ class ChatGPTAdapter(SiteAdapter):
             # 构建匹配模式
             mv = (model_version or self._model_version or "").lower()
             
-            # 关键修复：优先匹配 5.2 Instant
-            if "5.2instant" in mv or "5-2-instant" in mv or "5.2-instant" in mv:
-                # 匹配 5.2 Instant
-                pattern = re.compile(r"5[.\-]?2.*instant|instant.*5[.\-]?2|5[.\-]?2.*即时|即时.*5[.\-]?2", re.I)
-            elif "5.2pro" in mv or "5-2-pro" in mv or "5.2-pro" in mv or "gpt-5.2-pro" in mv:
-                # 匹配 5.2 Pro 或 GPT-5 相关模型
-                pattern = re.compile(r"5[.\-]?2|gpt[.\-]?5|\bpro\b|专业|Professional", re.I)
-            elif "5.2" in mv or "gpt-5" in mv:
-                # 匹配 5.2 相关模型（默认 Pro）
-                pattern = re.compile(r"5[.\-]?2|gpt[.\-]?5|\bpro\b|专业|Professional", re.I)
+            # 根据日志分析，ChatGPT 菜单选项格式如下：
+            # - "Auto 自动决定思考时长"
+            # - "Instant 即刻回答"
+            # - "Thinking 思考更充分，回答更优质"
+            # - "Pro 研究级智能模型"
+            # - "传统模型"
+            
+            # 关键修复：匹配菜单中的实际文本
+            if "instant" in mv:
+                # 匹配 Instant 或 即刻回答（适用于 5.2instant, instant 等）
+                pattern = re.compile(r"\bInstant\b|即刻", re.I)
+                self._log(f"mode: using Instant pattern for model_version={mv}")
+            elif "pro" in mv:
+                # 匹配 Pro 或 研究级智能模型（适用于 5.2pro, pro 等）
+                pattern = re.compile(r"\bPro\b|研究级", re.I)
+                self._log(f"mode: using Pro pattern for model_version={mv}")
+            elif "thinking" in mv:
+                # 匹配 Thinking（更精确，避免匹配 "自动决定思考时长"）
+                pattern = re.compile(r"\bThinking\b|思考更充分", re.I)
+                self._log(f"mode: using Thinking pattern for model_version={mv}")
+            elif "auto" in mv:
+                # 匹配 Auto 或 自动
+                pattern = re.compile(r"\bAuto\b|自动", re.I)
+                self._log(f"mode: using Auto pattern for model_version={mv}")
             elif "4o" in mv or "4-o" in mv:
-                # 匹配 GPT-4o
+                # 匹配 GPT-4o（在传统模型菜单中）
                 pattern = re.compile(r"4[.\-]?o|gpt[.\-]?4", re.I)
-            elif "instant" in mv:
-                # 匹配 Instant（单独的 instant 已经在上面处理了，这里是兜底）
-                pattern = re.compile(r"\binstant\b|即时|Instant", re.I)
+                self._log(f"mode: using GPT-4o pattern for model_version={mv}")
             else:
                 # 默认匹配 Pro
-                pattern = re.compile(r"\bPro\b|专业|Professional", re.I)
+                pattern = re.compile(r"\bPro\b|研究级", re.I)
+                self._log(f"mode: using default Pro pattern for model_version={mv}")
             
             ok = await self._select_model_menu_item(pattern, model_version=model_version or self._model_version)
             if not ok:

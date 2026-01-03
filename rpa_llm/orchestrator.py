@@ -87,6 +87,42 @@ def render_prompt(stream: StreamSpec, topic: str, context: str, questions: List[
     return prompt.strip()
 
 
+def _extract_prompt_content(content: str) -> str:
+    """
+    从 prompt 文件内容中提取实际的 prompt 正文。
+    
+    支持以下格式：
+    1. 如果文件包含 <prompt></prompt> 标签，提取标签之间的内容
+    2. 如果没有标签，返回去除 frontmatter 后的内容
+    
+    Args:
+        content: 原始文件内容
+    
+    Returns:
+        提取后的 prompt 内容
+    """
+    import re
+    
+    # 1. 尝试提取 <prompt></prompt> 标签之间的内容
+    prompt_match = re.search(r'<prompt>\s*(.*?)\s*</prompt>', content, re.DOTALL | re.IGNORECASE)
+    if prompt_match:
+        extracted = prompt_match.group(1).strip()
+        print(f"[orchestrator] 从 <prompt> 标签提取内容 ({len(extracted)} 字符)")
+        return extracted
+    
+    # 2. 如果没有 <prompt> 标签，去除 frontmatter（如果存在）
+    # Frontmatter 格式: 文件开头以 --- 开始，以 --- 结束
+    frontmatter_match = re.match(r'^---\s*\n.*?\n---\s*\n', content, re.DOTALL)
+    if frontmatter_match:
+        # 去除 frontmatter，返回剩余内容
+        remaining = content[frontmatter_match.end():].strip()
+        print(f"[orchestrator] 去除 frontmatter 后的内容 ({len(remaining)} 字符)")
+        return remaining
+    
+    # 3. 既没有 <prompt> 标签也没有 frontmatter，返回原始内容
+    return content.strip()
+
+
 def build_tasks(
     run_id: str,
     brief: Brief,
@@ -106,8 +142,11 @@ def build_tasks(
     custom_prompt = None
     if prompt_file_path and prompt_file_path.exists():
         try:
-            custom_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
-            print(f"[orchestrator] 从文件读取 prompt ({len(custom_prompt)} 字符): {prompt_file_path}")
+            raw_content = prompt_file_path.read_text(encoding="utf-8")
+            print(f"[orchestrator] 从文件读取 prompt (原始 {len(raw_content)} 字符): {prompt_file_path}")
+            # 提取实际的 prompt 内容（支持 <prompt> 标签和去除 frontmatter）
+            custom_prompt = _extract_prompt_content(raw_content)
+            print(f"[orchestrator] 提取后的 prompt ({len(custom_prompt)} 字符)")
         except Exception as e:
             print(f"[orchestrator] 警告: 无法读取 prompt 文件 {prompt_file_path}: {e}，将使用 brief.yaml 中的模板")
     
