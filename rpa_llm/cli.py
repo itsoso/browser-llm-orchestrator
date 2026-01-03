@@ -22,10 +22,32 @@ def main():
     parser.add_argument("--run-id", default=None, help="Run id (default: utc timestamp)")
     parser.add_argument("--headless", action="store_true", help="Run headless (NOT recommended for LLM sites)")
     parser.add_argument("--log-file", help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
+    parser.add_argument(
+        "--model-version",
+        help="指定 ChatGPT 模型版本（如：5.2pro, 5.2instant, thinking）。会覆盖 brief.yaml 中的配置。"
+    )
+    parser.add_argument(
+        "--prompt-file",
+        help="自定义 prompt 文件路径（支持 Obsidian 文件路径，如：/path/to/file.md）。如果指定，将使用文件内容作为 prompt，忽略 brief.yaml 中的 prompt_template。"
+    )
     args = parser.parse_args()
 
     brief_path = Path(args.brief).expanduser().resolve()
     run_id = args.run_id or utc_now_iso().replace(":", "").replace("+", "_")
+    
+    # 处理自定义 prompt 文件
+    prompt_file_path = None
+    if args.prompt_file:
+        prompt_file_path = Path(args.prompt_file).expanduser().resolve()
+        if not prompt_file_path.exists():
+            print(f"[cli] 错误: prompt 文件不存在: {prompt_file_path}", file=sys.stderr)
+            sys.exit(1)
+        print(f"[cli] 使用自定义 prompt 文件: {prompt_file_path}")
+    
+    # 处理模型版本
+    model_version = args.model_version
+    if model_version:
+        print(f"[cli] 指定模型版本: {model_version} (将覆盖 brief.yaml 中的配置)")
 
     # 设置日志文件
     if args.log_file:
@@ -72,7 +94,15 @@ def main():
     print(f"[cli] 日志文件路径: {log_file.absolute()}")
     
     try:
-        run_index_path, results = asyncio.run(run_all(brief_path, run_id=run_id, headless=args.headless))
+        run_index_path, results = asyncio.run(
+            run_all(
+                brief_path,
+                run_id=run_id,
+                headless=args.headless,
+                model_version=model_version,
+                prompt_file_path=prompt_file_path,
+            )
+        )
 
         ok = sum(1 for r in results if r.ok)
         total = len(results)

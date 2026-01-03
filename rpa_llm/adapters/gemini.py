@@ -926,6 +926,31 @@ class GeminiAdapter(SiteAdapter):
         except Exception as e:
             self._log(f"send: Control+Enter(keyboard) error: {type(e).__name__}: {str(e)[:120]}")
 
+        # 关键修复：在尝试 Enter 之前，先检查 Control+Enter 是否已经成功
+        # 避免重复发送导致 Gemini 收到多条消息（导致"停止回答"问题）
+        try:
+            # 等待更长时间让 Gemini 处理 Control+Enter
+            await asyncio.sleep(0.5)  # 增加等待时间，让 Gemini 有时间响应
+            
+            # 检查输入框是否已清空
+            current_text = (await self._tb_get_text(tb)).strip()
+            if before_len > 0 and len(current_text) <= max(0, int(before_len * 0.1)):
+                self._log("send: Control+Enter already worked (textbox cleared after delay), skipping Enter")
+                return "control_enter:delayed_confirm_textbox_cleared"
+            
+            # 检查是否已经在生成
+            if await self._is_generating():
+                self._log("send: Control+Enter already worked (generating detected), skipping Enter")
+                return "control_enter:delayed_confirm_generating"
+            
+            # 检查 assistant_count 是否增加
+            assist_cnt_now = await self._assistant_count()
+            if assist_cnt_now > assist_cnt0:
+                self._log(f"send: Control+Enter already worked (assistant_count {assist_cnt0}->{assist_cnt_now}), skipping Enter")
+                return "control_enter:delayed_confirm_assist_count"
+        except Exception as e:
+            self._log(f"send: pre-Enter check failed: {e}, continuing with Enter fallback...")
+
         # B) Enter as fallback (keyboard, not locator.press)
         # 优化（P0）：Enter 后立即检查输入框是否变空，避免等待按钮超时
         self._log("send: trying Enter as fallback (keyboard)")

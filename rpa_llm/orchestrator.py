@@ -87,11 +87,38 @@ def render_prompt(stream: StreamSpec, topic: str, context: str, questions: List[
     return prompt.strip()
 
 
-def build_tasks(run_id: str, brief: Brief) -> List[Task]:
+def build_tasks(
+    run_id: str,
+    brief: Brief,
+    prompt_file_path: Optional[Path] = None,
+) -> List[Task]:
+    """
+    构建任务列表。
+    
+    Args:
+        run_id: 运行 ID
+        brief: Brief 配置对象
+        prompt_file_path: 可选的 prompt 文件路径。如果指定，将使用文件内容作为 prompt，忽略 brief 中的 prompt_template。
+    """
     tasks: List[Task] = []
+    
+    # 如果指定了 prompt 文件，读取文件内容
+    custom_prompt = None
+    if prompt_file_path and prompt_file_path.exists():
+        try:
+            custom_prompt = prompt_file_path.read_text(encoding="utf-8").strip()
+            print(f"[orchestrator] 从文件读取 prompt ({len(custom_prompt)} 字符): {prompt_file_path}")
+        except Exception as e:
+            print(f"[orchestrator] 警告: 无法读取 prompt 文件 {prompt_file_path}: {e}，将使用 brief.yaml 中的模板")
+    
     for site in brief.sites:
         for stream in brief.streams:
-            prompt = render_prompt(stream, brief.topic, brief.context, brief.questions)
+            # 如果提供了自定义 prompt，使用它；否则使用模板渲染
+            if custom_prompt:
+                prompt = custom_prompt
+            else:
+                prompt = render_prompt(stream, brief.topic, brief.context, brief.questions)
+            
             tasks.append(
                 Task(
                     run_id=run_id,
@@ -450,7 +477,23 @@ async def run_synthesis_and_final(
     write_markdown(final_path, fm_f, answer)
 
 
-async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tuple[Path, List[ModelResult]]:
+async def run_all(
+    brief_path: Path,
+    run_id: str,
+    headless: bool = False,
+    model_version: Optional[str] = None,
+    prompt_file_path: Optional[Path] = None,
+) -> Tuple[Path, List[ModelResult]]:
+    """
+    运行所有任务。
+    
+    Args:
+        brief_path: Brief YAML 文件路径
+        run_id: 运行 ID
+        headless: 是否无头模式
+        model_version: 可选的模型版本（如：5.2pro, 5.2instant）。如果指定，将覆盖 brief.yaml 中的配置。
+        prompt_file_path: 可选的 prompt 文件路径。如果指定，将使用文件内容作为 prompt。
+    """
     brief = load_brief(brief_path)
 
     vault_path = Path(brief.output["vault_path"]).expanduser().resolve()
@@ -483,7 +526,7 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
     ensure_dir(artifacts_root)
     ensure_dir(profiles_root)
 
-    tasks = build_tasks(run_id, brief)
+    tasks = build_tasks(run_id, brief, prompt_file_path=prompt_file_path)
     site_map: Dict[str, List[Task]] = {}
     for t in tasks:
         site_map.setdefault(t.site_id, []).append(t)
@@ -524,6 +567,14 @@ async def run_all(brief_path: Path, run_id: str, headless: bool = False) -> Tupl
     # 从 brief.yaml 读取每个站点的 model_version 配置
     # 支持格式：output.site_model_versions: { "chatgpt": "5.2pro", "gemini": "..." }
     site_model_versions = brief.output.get("site_model_versions", {})
+    
+    # 如果 CLI 指定了 model_version，覆盖所有 ChatGPT 站点的配置
+    if model_version:
+        # 为所有 chatgpt 站点设置模型版本
+        for site_id in site_map.keys():
+            if site_id == "chatgpt":
+                site_model_versions[site_id] = model_version
+                print(f"[orchestrator] 使用 CLI 指定的模型版本: {site_id}={model_version}")
     
     # 构建 coros，同时处理延迟启动和耗时记录
     coros = []
