@@ -79,15 +79,30 @@ def build_run_index_note(run_id: str, topic: str, tags: List[str]) -> str:
     ).format(run_id=run_id, topic=topic, created=created)
 
 
-def model_output_note_body(prompt: str, answer: str) -> str:
-    return (
-        "## Prompt\n\n"
-        "```text\n"
-        f"{prompt.strip()}\n"
-        "```\n\n"
-        "## Answer (Raw)\n\n"
-        f"{answer.strip()}\n"
-    )
+def model_output_note_body(prompt: str, answer: str, include_prompt: bool = False) -> str:
+    """
+    生成模型输出笔记的正文内容。
+    
+    Args:
+        prompt: 原始 prompt（仅在 include_prompt=True 时包含）
+        answer: 模型的回答
+        include_prompt: 是否包含原始 prompt。默认 False，不包含以保持输出简洁。
+    
+    Returns:
+        格式化的 Markdown 正文
+    """
+    if include_prompt:
+        return (
+            "## Prompt\n\n"
+            "```text\n"
+            f"{prompt.strip()}\n"
+            "```\n\n"
+            "## Answer (Raw)\n\n"
+            f"{answer.strip()}\n"
+        )
+    else:
+        # 默认不包含 prompt，只输出 answer
+        return f"{answer.strip()}\n"
 
 
 def make_model_output_filename(topic: str, stream_id: str, site_id: str) -> str:
