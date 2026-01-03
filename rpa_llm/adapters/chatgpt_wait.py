@@ -358,7 +358,9 @@ class ChatGPTWaiter:
                             self._get_assistant_text_by_index(target_index),
                             timeout=1.2
                         )
-                        if current_text and current_text != last_assist_text_before:
+                        # 关键修复：检查文本是否与之前不同，且长度大于 0
+                        # 如果 current_text 等于 last_assist_text_before，说明读取的是旧消息，不应该认为新消息已出现
+                        if current_text and current_text != last_assist_text_before and len(current_text.strip()) > 0:
                             # 关键修复：即使检测到文本，也要检查是否还在 thinking 状态
                             # 如果还在 thinking，文本可能是占位符，不应该认为内容已出现
                             try:
@@ -378,6 +380,12 @@ class ChatGPTWaiter:
                             new_message_found = True
                             self._log(f"ask: new message content detected via index {target_index} (len={len(current_text)})")
                             break
+                        elif current_text == last_assist_text_before:
+                            # 关键修复：如果读取的文本与之前相同，说明可能是旧消息，不应该认为新消息已出现
+                            # 继续等待新消息
+                            if time.time() - hb >= 5:
+                                self._log(f"ask: warning - read same text as before (len={len(current_text)}), may be old message, continuing to wait...")
+                                hb = time.time()
                     except asyncio.TimeoutError:
                         pass
                     except Exception as e:
@@ -424,6 +432,7 @@ class ChatGPTWaiter:
         n_assist0: int,
         ask_start_time: float,
         timeout_s: float,
+        last_assist_text_before: Optional[str] = None,
     ) -> Tuple[str, str]:
         """
         等待输出稳定
@@ -432,6 +441,7 @@ class ChatGPTWaiter:
             n_assist0: 发送前的 assistant 消息数量
             ask_start_time: ask 方法开始时间
             timeout_s: 总超时时间
+            last_assist_text_before: 发送前的最后一条 assistant 消息文本（可选，用于验证新消息）
         
         Returns:
             (final_text, page_url) 元组
@@ -537,6 +547,20 @@ class ChatGPTWaiter:
                 
                 current_len = result.get("len", 0) if isinstance(result, dict) else 0
                 current_hash = result.get("hash", "") if isinstance(result, dict) else ""
+                
+                # 关键修复：如果提供了 last_assist_text_before，验证读取的不是旧消息
+                # 通过比较长度来判断（如果长度相同且都很大，可能是旧消息）
+                if last_assist_text_before and len(last_assist_text_before) > 0:
+                    before_len = len(last_assist_text_before)
+                    # 如果当前长度与之前相同，且长度很大（>1000），可能是旧消息
+                    # 需要等待新消息出现（长度应该会变化或不同）
+                    if current_len == before_len and current_len > 1000:
+                        # 可能是旧消息，继续等待
+                        if time.time() - hb >= 10:
+                            self._log(f"ask: warning - current text length ({current_len}) matches before length ({before_len}), may be old message, continuing to wait...")
+                            hb = time.time()
+                        await asyncio.sleep(0.3)
+                        continue
                 
                 # 确保获取的是新消息（不是发送前的旧消息）
                 if current_len > 0 and current_hash != "":
@@ -667,6 +691,11 @@ class ChatGPTWaiter:
                 # DOM 查询超时，继续等待
                 pass
             except Exception as e:
+                error_str = str(e)
+                # 关键修复：检测浏览器/页面关闭错误，立即抛出异常
+                if "closed" in error_str.lower() or "target" in error_str.lower():
+                    self._log(f"ask: browser/page closed detected: {e}")
+                    raise RuntimeError(f"Browser or page was closed: {e}") from e
                 self._log(f"ask: DOM query error: {e}")
 
             if time.time() - hb >= 10:

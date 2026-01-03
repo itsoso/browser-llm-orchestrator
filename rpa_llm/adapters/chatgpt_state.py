@@ -78,13 +78,17 @@ class ChatGPTStateDetector:
             return 0
 
     async def last_assistant_text(self) -> str:
-        """获取最后一条 assistant 消息文本"""
+        """
+        获取最后一条 assistant 消息文本。
+        修复：添加显式超时，避免默认 30 秒超时导致 Future exception was never retrieved。
+        """
         for sel in self.ASSISTANT_MSG:
             loc = self.page.locator(sel)
             try:
                 cnt = await loc.count()
                 if cnt > 0:
-                    return (await loc.nth(cnt - 1).inner_text()).strip()
+                    # 修复：使用显式超时（2秒），避免默认 30 秒超时导致 Future exception
+                    return (await loc.nth(cnt - 1).inner_text(timeout=2000)).strip()
             except Exception:
                 continue
         return ""
@@ -93,6 +97,8 @@ class ChatGPTStateDetector:
         """
         根据索引获取 assistant 消息文本（0-index）。
         当 assistant_count(after)=k 时，读取第 k-1 条消息（0-index）。
+        
+        修复：添加显式超时，避免默认 30 秒超时导致 Future exception was never retrieved。
         
         Args:
             index: 消息索引（0-index），例如 assistant_count=3 时，index=2 表示最后一条消息
@@ -108,8 +114,8 @@ class ChatGPTStateDetector:
             try:
                 cnt = await loc.count()
                 if cnt > 0 and index < cnt:
-                    # 使用索引定位，而不是 last
-                    text = await loc.nth(index).inner_text()
+                    # 修复：使用显式超时（2秒），避免默认 30 秒超时导致 Future exception
+                    text = await loc.nth(index).inner_text(timeout=2000)
                     if text:
                         return text.strip()
             except Exception:

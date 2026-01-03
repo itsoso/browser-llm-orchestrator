@@ -28,7 +28,18 @@ def run_task(driver_url: str, site_id: str, prompt: str, timeout_s: int = 1200, 
     try:
         with urllib.request.urlopen(req, timeout=timeout_s + 30) as resp:
             body = resp.read()
-            return json.loads(body.decode("utf-8"))
+            try:
+                result = json.loads(body.decode("utf-8"))
+                # 关键修复：验证 answer 字段是否存在且为字符串
+                if "answer" in result:
+                    answer = result.get("answer")
+                    if answer is not None and not isinstance(answer, str):
+                        # 如果不是字符串，转换为字符串
+                        result["answer"] = str(answer)
+                return result
+            except json.JSONDecodeError as json_err:
+                # JSON 解析失败，返回错误
+                return {"ok": False, "error": f"JSON decode error: {json_err}", "raw_body": body[:500].decode("utf-8", errors="ignore")}
     except urllib.error.HTTPError as e:
         # 关键：把 server 返回的 JSON error 读出来
         try:

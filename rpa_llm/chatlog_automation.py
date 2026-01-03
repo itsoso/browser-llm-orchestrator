@@ -291,7 +291,31 @@ async def load_template_and_generate_prompt(
     period_end = end.strftime("%Y-%m-%d") if end else date_range.split("~")[-1] if "~" in date_range else date_range
     period_start_dot = period_start.replace("-", ".")
     period_end_dot = period_end.replace("-", ".")
-    raw_note = str(raw_file_path) if raw_file_path else ""
+    
+    # 生成 raw_note：使用相对于 Obsidian vault 的路径
+    # Obsidian wikilink 格式：[[相对路径/文件名（不带.md扩展名）]]
+    raw_note = ""
+    if raw_file_path:
+        # 尝试计算相对于 vault 根目录的路径
+        # 假设 vault 路径包含 "obsidian" 或 "personal" 目录
+        raw_path_str = str(raw_file_path)
+        
+        # 查找 vault 根目录（通常是 obsidian/personal/ 后的部分）
+        # 例如：/Users/.../obsidian/personal/10_Sources/... -> 10_Sources/...
+        vault_markers = ["/obsidian/personal/", "/personal/", "/obsidian/"]
+        for marker in vault_markers:
+            if marker in raw_path_str:
+                # 取 marker 之后的部分
+                relative_path = raw_path_str.split(marker)[-1]
+                # 移除 .md 扩展名（Obsidian wikilink 不需要扩展名）
+                if relative_path.endswith(".md"):
+                    relative_path = relative_path[:-3]
+                raw_note = relative_path
+                break
+        
+        # 如果没有找到 vault marker，使用文件名（不带扩展名）
+        if not raw_note:
+            raw_note = raw_file_path.stem  # 只使用文件名，不带扩展名
     
     # 先替换 {{}} 格式的占位符（模板格式）
     # 生成当前日期时间（用于 Obsidian 的 created 字段）
@@ -416,26 +440,60 @@ async def save_summary_file(
     filename = f"{talker} 第{week}周-{date_range_str}-Sum-{normalized_model_version}.md"
     summary_path = paths["dir"] / filename
     
+    # 关键修复：验证 summary_content 不为空
+    if not summary_content:
+        raise ValueError(f"summary_content 为空，无法保存文件！talker={talker}, start={start}, end={end}")
+    
     # 在写入 Obsidian 之前清理代码块标记，确保内容能正常渲染
     # 这样保留 LLM 的原始返回结果，只在最终写入时处理
+    original_len = len(summary_content)
     cleaned_content = clean_text_code_block(summary_content)
+    cleaned_len = len(cleaned_content) if cleaned_content else 0
+    
+    # 调试：检查清理过程
+    if original_len > 0 and cleaned_len == 0:
+        print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: 清理后内容为空！原始长度 = {original_len}")
+        print(f"[{beijing_now_iso()}] [automation] 调试: 原始内容前 500 字符 = {summary_content[:500]}")
+        print(f"[{beijing_now_iso()}] [automation] 调试: 原始内容后 500 字符 = {summary_content[-500:]}")
+        # 如果清理后为空，使用原始内容
+        cleaned_content = summary_content
+        print(f"[{beijing_now_iso()}] [automation] 调试: 使用原始内容，长度 = {len(cleaned_content)}")
+    elif original_len != cleaned_len:
+        print(f"[{beijing_now_iso()}] [automation] 调试: 清理后长度变化 {original_len} -> {cleaned_len}")
+    
+    # 关键修复：确保 cleaned_content 不为空
+    if not cleaned_content or len(cleaned_content.strip()) == 0:
+        raise ValueError(f"清理后内容为空！原始长度 = {original_len}, 清理后长度 = {cleaned_len}")
     
     # 保存 summary 文件
-    write_markdown(
-        summary_path,
-        {
-            "type": ["wechat_summary", "chatlog_analysis"],
-            "created": beijing_now_iso(),
-            "talker": talker,
-            "date_range": date_range_str,
-            "week": week,
-            "model_version": model_version,
-        },
-        cleaned_content,
-        skip_frontmatter=skip_frontmatter,
-    )
+    try:
+        write_markdown(
+            summary_path,
+            {
+                "type": ["wechat_summary", "chatlog_analysis"],
+                "created": beijing_now_iso(),
+                "talker": talker,
+                "date_range": date_range_str,
+                "week": week,
+                "model_version": model_version,
+            },
+            cleaned_content,
+            skip_frontmatter=skip_frontmatter,
+        )
+        
+        # 验证文件是否成功写入
+        if summary_path.exists():
+            file_size = summary_path.stat().st_size
+            print(f"[{beijing_now_iso()}] [automation] ✓ Summary 文件已保存: {summary_path} (大小: {file_size} 字节)")
+            if file_size < 100:
+                print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: 文件大小异常小 ({file_size} 字节)，可能内容为空！")
+                print(f"[{beijing_now_iso()}] [automation] 调试: cleaned_content 长度 = {len(cleaned_content) if cleaned_content else 0}")
+        else:
+            print(f"[{beijing_now_iso()}] [automation] ⚠️  错误: 文件未创建: {summary_path}")
+    except Exception as e:
+        print(f"[{beijing_now_iso()}] [automation] ⚠️  错误: 保存文件时出错: {e}")
+        raise
     
-    print(f"[{beijing_now_iso()}] [automation] ✓ Summary 文件已保存: {summary_path}")
     return summary_path
 
 
@@ -582,7 +640,14 @@ async def run_automation(
                 raise RuntimeError(f"LLM 分析失败 (site={arbitrator_site}): {error_msg}")
         
         ok = bool(payload.get("ok"))
-        answer = payload.get("answer") or ""
+        # 关键修复：确保 answer 不是 None，且正确处理空字符串
+        answer = payload.get("answer")
+        if answer is None:
+            answer = ""
+        elif not isinstance(answer, str):
+            # 如果不是字符串，转换为字符串
+            answer = str(answer)
+        
         # 保留 LLM 的原始返回结果，不在这里清理
         url = payload.get("url") or ""
         err = payload.get("error")
@@ -625,6 +690,20 @@ async def run_automation(
             raise RuntimeError(error_msg)
         
         print(f"[{beijing_now_iso()}] [automation] ✓ LLM 分析完成 (request_id={request_id})")
+        
+        # 关键修复：验证 answer 内容
+        answer_len = len(answer) if answer else 0
+        print(f"[{beijing_now_iso()}] [automation] 调试: answer 长度 = {answer_len}, ok = {ok}")
+        if answer_len > 0:
+            print(f"[{beijing_now_iso()}] [automation] 调试: answer 前 200 字符 = {answer[:200]}")
+            print(f"[{beijing_now_iso()}] [automation] 调试: answer 后 200 字符 = {answer[-200:]}")
+        else:
+            print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: answer 为空！")
+            if err:
+                print(f"[{beijing_now_iso()}] [automation] 错误信息: {err}")
+            # 如果 answer 为空但 ok=True，可能是异常情况
+            if ok and answer_len == 0:
+                print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: ok=True 但 answer 为空，可能存在数据丢失！")
         
         # 步骤 5: 保存 summary 文件
         summary_path = await save_summary_file(
@@ -685,6 +764,7 @@ def main():
     parser.add_argument("--task-timeout-s", type=int, default=None, help="任务超时时间（秒，默认: 600）")
     parser.add_argument("--new-chat", action="store_true", help="每次提交 prompt 时都打开新窗口（新聊天）")
     parser.add_argument("--new_chat", action="store_true", help="每次提交 prompt 时都打开新窗口（别名，等同于 --new-chat）")
+    parser.add_argument("--auto-mode", action="store_true", help="自动模式：遇到 manual checkpoint 时自动抛出异常而不是等待用户输入（批量处理时推荐启用）")
     parser.add_argument("--log-file", default=None, help="日志文件路径（如果未指定，则自动生成到 logs/ 目录）")
     
     args = parser.parse_args()
@@ -743,6 +823,12 @@ def main():
     
     print(f"[automation] 日志文件: {log_file}")
     print(f"[automation] 日志文件路径: {log_file.absolute()}")
+    
+    # 设置自动模式（批量处理时推荐启用）
+    if args.auto_mode:
+        import os
+        os.environ["RPA_AUTO_MODE"] = "1"
+        print(f"[{beijing_now_iso()}] [automation] 自动模式已启用：遇到 manual checkpoint 时将自动抛出异常")
     
     try:
         # 解析日期

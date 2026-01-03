@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -24,6 +25,9 @@ from .chatlog_automation import (
 )
 from .chatlog_client import ChatlogClient
 from .utils import beijing_now_iso
+
+# 批量处理模式：设置环境变量，让 manual_checkpoint 自动抛出异常而不是等待用户输入
+os.environ["RPA_AUTO_MODE"] = "1"
 
 
 async def check_week_has_data(
@@ -318,8 +322,15 @@ def main():
             try:
                 with open(brief_path, "r", encoding="utf-8") as f:
                     brief_config = yaml.safe_load(f)
-                    if brief_config and "driver" in brief_config:
-                        driver_url = brief_config["driver"].get("url")
+                    if brief_config:
+                        # 支持多种结构：output.driver_url, driver.url, driver_url
+                        driver_url = (
+                            brief_config.get("output", {}).get("driver_url") or
+                            brief_config.get("driver", {}).get("url") or
+                            brief_config.get("driver_url")
+                        )
+                        if driver_url:
+                            print(f"[{beijing_now_iso()}] [batch] 从 brief.yaml 读取 driver_url: {driver_url}")
             except Exception:
                 pass
     

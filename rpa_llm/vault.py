@@ -27,6 +27,10 @@ def write_markdown(
     body: str,
     skip_frontmatter: bool = False,
 ) -> None:
+    # 关键修复：验证 body 不为空
+    if not body or len(body.strip()) == 0:
+        raise ValueError(f"body 为空，无法写入文件: {path}")
+    
     ensure_dir(path.parent)
     if skip_frontmatter:
         content = body.strip() + "\n"

@@ -21,7 +21,7 @@ week: {{week}}
 period_start: {{period_start}}
 period_end: {{period_end}}
 source: "wechat chatlog"
-raw_note: '{{raw_note}}'
+raw_note: '[[{{raw_note}}]]'
 tags: YAML list（数组），元素为字符串，最多 12 个，按重要性排序
 topics: YAML list（数组），元素为字符串，最多 12 个，按重要性排序
 key_people: YAML list（数组），元素为字符串，最多 12 个，按影响力排序；格式为“昵称(wxid/备注可选)”或“昵称”

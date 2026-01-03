@@ -99,6 +99,70 @@ class ChatGPTSender:
             except Exception:
                 pass
 
+    async def _wait_for_dom_stable(self, max_wait_s: float = 2.0) -> bool:
+        """
+        P0-3 修复：等待 DOM 稳定，确保 textbox 可用。
+        
+        检查条件：
+        1. #prompt-textarea 存在且可见
+        2. 没有加载动画
+        3. 页面网络请求已稳定
+        
+        Args:
+            max_wait_s: 最大等待时间（秒）
+            
+        Returns:
+            True 如果 DOM 稳定，False 如果超时
+        """
+        t0 = time.time()
+        check_interval = 0.1
+        last_state = None
+        stable_count = 0
+        required_stable_count = 3  # 连续 3 次检查结果相同才认为稳定
+        
+        while time.time() - t0 < max_wait_s:
+            try:
+                # 检查 textbox 状态
+                state = await self.page.evaluate(
+                    """() => {
+                        const textarea = document.querySelector('#prompt-textarea');
+                        if (!textarea) return {ready: false, reason: 'not found'};
+                        if (textarea.offsetParent === null) return {ready: false, reason: 'not visible'};
+                        
+                        // 检查是否有加载动画
+                        const spinners = document.querySelectorAll('[class*="loading"], [class*="spinner"], [class*="skeleton"]');
+                        for (const s of spinners) {
+                            if (s.offsetParent !== null) return {ready: false, reason: 'loading'};
+                        }
+                        
+                        return {ready: true, reason: 'ok'};
+                    }"""
+                )
+                
+                # 检查状态是否稳定
+                state_str = str(state)
+                if state_str == last_state:
+                    stable_count += 1
+                    if stable_count >= required_stable_count:
+                        if isinstance(state, dict) and state.get("ready"):
+                            self._log(f"send: DOM stable ({time.time() - t0:.2f}s)")
+                            return True
+                        else:
+                            # DOM 稳定但 textbox 不可用
+                            break
+                else:
+                    stable_count = 0
+                    last_state = state_str
+                    
+            except Exception:
+                stable_count = 0
+                last_state = None
+            
+            await asyncio.sleep(check_interval)
+        
+        self._log(f"send: DOM stability timeout ({max_wait_s}s)")
+        return False
+
     async def _fast_send_confirm(self, user0: int, timeout_ms: int = 1500) -> bool:
         """
         P0优化：快速确认发送成功，使用 page.wait_for_function（最便宜、最快）。
@@ -196,14 +260,69 @@ class ChatGPTSender:
         
         return False
 
-    async def _trigger_send_fast(self, user0: int) -> None:
+    async def _trigger_send_fast(self, user0: int, prompt_len: int = 0) -> None:
         """
         P0优化：快路径发送，使用 page.keyboard.press("Control+Enter") + 高频轮询确认。
         避免 Locator.press() 的 actionability 等待和复杂的确认逻辑。
         
+        P0-2 修复：对大 prompt 增加等待和焦点确认。
+        
         Args:
             user0: 发送前的用户消息数量
+            prompt_len: prompt 长度（用于判断是否需要额外等待）
         """
+        # P0-2 修复：在发送前确保焦点在输入框，并等待 ChatGPT 处理大 prompt
+        try:
+            # 使用 JS 确保焦点在输入框
+            await self.page.evaluate(
+                """() => {
+                    const textarea = document.querySelector('#prompt-textarea');
+                    if (textarea) {
+                        textarea.focus();
+                        // 将光标移到末尾
+                        const range = document.createRange();
+                        range.selectNodeContents(textarea);
+                        range.collapse(false);
+                        const sel = window.getSelection();
+                        sel.removeAllRanges();
+                        sel.addRange(range);
+                    }
+                }"""
+            )
+        except Exception:
+            pass
+        
+        # P0-2 修复：对大 prompt（>50K 字符）增加等待时间，让 ChatGPT 处理输入
+        if prompt_len > 50000:
+            extra_wait = min(2.0, prompt_len / 50000 * 0.5)  # 最多等待 2 秒
+            self._log(f"send: large prompt ({prompt_len} chars), waiting {extra_wait:.1f}s for ChatGPT to process...")
+            await asyncio.sleep(extra_wait)
+        
+        # P0-2 修复：检查发送按钮是否可用（不是 disabled 状态）
+        try:
+            is_ready = await self.page.evaluate(
+                """() => {
+                    // 查找发送按钮
+                    const sendBtn = document.querySelector('button[data-testid="send-button"]') ||
+                                    document.querySelector('button[aria-label*="Send"]') ||
+                                    document.querySelector('button[aria-label*="发送"]');
+                    if (sendBtn) {
+                        // 检查是否 disabled
+                        if (sendBtn.disabled || sendBtn.getAttribute('aria-disabled') === 'true') {
+                            return {ready: false, reason: 'button disabled'};
+                        }
+                        return {ready: true, reason: 'button found and enabled'};
+                    }
+                    // 如果找不到发送按钮，假设可以发送
+                    return {ready: true, reason: 'no button found, assume ready'};
+                }"""
+            )
+            if isinstance(is_ready, dict) and not is_ready.get("ready"):
+                self._log(f"send: button not ready ({is_ready.get('reason')}), waiting 0.5s...")
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+        
         # 使用 page.keyboard.press，避免 Locator.press() 的 actionability 等待
         self._log("send: pressing Control+Enter (fast path)...")
         await self.page.keyboard.press("Control+Enter")
@@ -347,6 +466,13 @@ class ChatGPTSender:
         
         # 0. 清理 prompt 中的换行符（避免输入时触发 Enter）
         prompt = self.clean_newlines(prompt, logger=lambda msg: self._log(f"send: {msg}"))
+        
+        # P0-3 修复：在寻找输入框之前，先等待 DOM 稳定
+        # 这可以避免 new_chat 后立即 send 导致的 textbox 找不到问题
+        try:
+            await self._wait_for_dom_stable()
+        except Exception as e:
+            self._log(f"send: DOM stability check failed: {e}, continuing anyway...")
         
         # 1. 寻找输入框（带重试机制）
         found = None
@@ -1251,7 +1377,8 @@ class ChatGPTSender:
                 pass
             
             self._log("send: using fast path (Control+Enter + wait_for_function)...")
-            await self._trigger_send_fast(user_count_before_send)
+            # P0-2 修复：传入 prompt 长度，用于大 prompt 场景优化
+            await self._trigger_send_fast(user_count_before_send, prompt_len=len(prompt))
             send_duration = time.time() - send_phase_start
             self._log(f"send: fast path succeeded ({send_duration:.2f}s)")
             return

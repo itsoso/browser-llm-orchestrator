@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -405,8 +406,15 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         - Saves artifacts.
         - If ready_check is provided, auto-polls for max_wait_s and continues automatically.
         - Otherwise (or on timeout), waits for user Enter.
+        
+        批量处理模式（环境变量 RPA_AUTO_MODE=1）：
+        - 自动继续，不等待用户输入
+        - 如果 ready_check 超时，自动抛出异常（而不是等待用户）
         """
         await self.save_artifacts("manual_checkpoint")
+
+        # 检查是否启用自动模式（批量处理）
+        auto_mode = os.environ.get("RPA_AUTO_MODE", "0").strip() == "1"
 
         print(f"\n[{beijing_now_iso()}] [{self.site_id}] MANUAL CHECKPOINT: {reason}", flush=True)
         print(f"[{beijing_now_iso()}] 请在打开的浏览器中完成操作（Cloudflare/登录/验证码/弹窗等）。", flush=True)
@@ -429,6 +437,12 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                     hb = loop.time()
 
                 await asyncio.sleep(1.0)
+
+        # 自动模式：超时后自动抛出异常，而不是等待用户输入
+        if auto_mode:
+            error_msg = f"manual_checkpoint 超时 ({reason}): 自动模式下无法等待用户输入，请检查浏览器页面状态"
+            print(f"[{beijing_now_iso()}] [{self.site_id}] AUTO_MODE: {error_msg}", flush=True)
+            raise RuntimeError(error_msg)
 
         print(f"[{beijing_now_iso()}] 完成后回到终端按 Enter 继续。\n", flush=True)
         await asyncio.to_thread(input, "Press Enter to continue...")
@@ -720,11 +734,17 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 raise RuntimeError(f"_tb_set_text: all methods failed: {type_err}")
 
     async def try_click(self, selectors: List[str], timeout_ms: int = 1500) -> bool:
+        """
+        尝试点击选择器列表中的第一个可见元素。
+        
+        修复：为 click() 添加显式超时，避免默认 30 秒超时导致总时间过长。
+        """
         for sel in selectors:
             try:
                 loc = self.page.locator(sel).first
                 await loc.wait_for(state="visible", timeout=timeout_ms)
-                await loc.click()
+                # 修复：添加显式超时，与 wait_for 使用相同的超时时间
+                await loc.click(timeout=timeout_ms)
                 return True
             except Exception:
                 continue

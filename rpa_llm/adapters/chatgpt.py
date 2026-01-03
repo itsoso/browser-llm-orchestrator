@@ -60,12 +60,23 @@ class ChatGPTAdapter(SiteAdapter):
 
     # 新聊天（可选）
     NEW_CHAT = [
+        # 侧边栏新聊天按钮（最常见）
+        'nav a[href="/"]',
+        'a[data-testid="create-new-chat-button"]',
+        'button[data-testid="create-new-chat-button"]',
+        # 文本匹配
         'a:has-text("新聊天")',
         'button:has-text("新聊天")',
         'a:has-text("New chat")',
         'button:has-text("New chat")',
+        # aria-label 匹配
         'a[aria-label*="New chat"]',
         'button[aria-label*="New chat"]',
+        'a[aria-label*="新聊天"]',
+        'button[aria-label*="新聊天"]',
+        # 侧边栏图标按钮（备用）
+        'nav button:first-child',
+        'aside a[href="/"]',
     ]
 
     # 生成中按钮：用于判断是否还在生成
@@ -734,19 +745,164 @@ class ChatGPTAdapter(SiteAdapter):
         await self.save_artifacts("ensure_ready_failed_after_manual")
         raise RuntimeError("ensure_ready: still cannot locate textbox after manual checkpoint.")
 
-    async def new_chat(self) -> None:
-        self._log("new_chat: best effort")
-        await self.try_click(self.NEW_CHAT, timeout_ms=2000)
+    async def _click_new_chat_button(self) -> bool:
+        """
+        P0-1 修复：使用多策略点击新聊天按钮。
         
-        # 优化：使用高频轮询检查，而不是wait_for_selector（更快）
-        # 目标：在5秒内检测到textarea出现
+        策略顺序：
+        1. 使用 JS 直接点击（最可靠，避免 actionability 等待）
+        2. 使用 Playwright try_click（作为备用）
+        3. 使用键盘快捷键（如果有的话）
+        
+        Returns:
+            True 如果点击成功，False 如果所有策略都失败
+        """
+        # 策略 1：使用 JS 直接点击（优先）
+        # 这避免了 Playwright 的 actionability 等待和遮挡检测
+        js_selectors = [
+            'nav a[href="/"]',
+            'a[data-testid="create-new-chat-button"]',
+            'button[data-testid="create-new-chat-button"]',
+            'a[href="/"]',
+        ]
+        
+        for sel in js_selectors:
+            try:
+                clicked = await self.page.evaluate(
+                    """(selector) => {
+                        const el = document.querySelector(selector);
+                        if (el && el.offsetParent !== null) {
+                            // 确保元素可见
+                            el.scrollIntoView({behavior: 'instant', block: 'center'});
+                            // 触发点击
+                            el.click();
+                            return true;
+                        }
+                        return false;
+                    }""",
+                    sel
+                )
+                if clicked:
+                    self._log(f"new_chat: JS click succeeded on {sel}")
+                    return True
+            except Exception as e:
+                self._log(f"new_chat: JS click failed on {sel}: {e}")
+                continue
+        
+        # 策略 2：使用文本匹配的 JS 点击
+        try:
+            clicked = await self.page.evaluate(
+                """() => {
+                    // 查找包含"新聊天"或"New chat"的链接或按钮
+                    const texts = ['新聊天', 'New chat', 'New Chat'];
+                    for (const text of texts) {
+                        const elements = document.querySelectorAll('a, button');
+                        for (const el of elements) {
+                            if (el.textContent && el.textContent.includes(text)) {
+                                if (el.offsetParent !== null) {
+                                    el.scrollIntoView({behavior: 'instant', block: 'center'});
+                                    el.click();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }"""
+            )
+            if clicked:
+                self._log("new_chat: JS text-based click succeeded")
+                return True
+        except Exception as e:
+            self._log(f"new_chat: JS text-based click failed: {e}")
+        
+        # 策略 3：使用 Playwright try_click（作为最后手段）
+        # 使用较短的超时，因为我们已经尝试了 JS 点击
+        try:
+            result = await self.try_click(self.NEW_CHAT, timeout_ms=2000)
+            if result:
+                self._log("new_chat: Playwright try_click succeeded")
+                return True
+        except Exception as e:
+            self._log(f"new_chat: Playwright try_click failed: {e}")
+        
+        return False
+
+    async def new_chat(self) -> None:
+        """
+        创建新聊天窗口。
+        
+        关键修复：必须确认新对话真正创建，不能只检查 textarea 存在。
+        检测标准：
+        1. URL 变化（从 /c/xxx 变为 / 或新的 /c/yyy）
+        2. 或 assistant_count 变为 0（新对话没有历史消息）
+        3. 如果点击失败，强制导航到 chatgpt.com 首页
+        """
+        self._log("new_chat: start")
+        
+        # 记录当前状态
+        original_url = self.page.url
+        original_assistant_count = await self._assistant_count()
+        self._log(f"new_chat: original_url={original_url}, assistant_count={original_assistant_count}")
+        
+        # P0-1 修复：使用多策略点击新聊天按钮
+        click_success = await self._click_new_chat_button()
+        self._log(f"new_chat: click result={click_success}")
+        
+        # 等待新对话确认（URL 变化或 assistant_count 变为 0）
         t0 = time.time()
-        max_wait_s = 5.0  # 最多等待5秒
-        check_interval = 0.05  # 每50ms检查一次（高频）
+        max_wait_s = 8.0  # 最多等待 8 秒
+        check_interval = 0.1
+        new_chat_confirmed = False
         
         while time.time() - t0 < max_wait_s:
             try:
-                # 使用JS evaluate快速检查textarea是否存在且可见
+                current_url = self.page.url
+                current_assistant_count = await self._assistant_count()
+                
+                # 检查是否是新对话
+                url_changed = current_url != original_url
+                is_home_page = not "/c/" in current_url  # 首页没有 /c/ 路径
+                no_messages = current_assistant_count == 0
+                
+                if url_changed or is_home_page or no_messages:
+                    elapsed = time.time() - t0
+                    self._log(f"new_chat: confirmed (url_changed={url_changed}, is_home={is_home_page}, no_messages={no_messages}, elapsed={elapsed:.2f}s)")
+                    new_chat_confirmed = True
+                    break
+                    
+            except Exception as e:
+                self._log(f"new_chat: check failed: {e}")
+            
+            await asyncio.sleep(check_interval)
+        
+        # 如果点击"新聊天"失败，强制导航到首页
+        if not new_chat_confirmed:
+            self._log("new_chat: click did not work, forcing navigation to homepage...")
+            try:
+                # 直接导航到 ChatGPT 首页
+                await self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=15000)
+                self._log("new_chat: navigated to homepage")
+                
+                # 等待页面稳定
+                await asyncio.sleep(1.0)
+                
+                # 再次确认
+                current_assistant_count = await self._assistant_count()
+                if current_assistant_count == 0:
+                    self._log("new_chat: homepage confirmed (assistant_count=0)")
+                    new_chat_confirmed = True
+                else:
+                    self._log(f"new_chat: homepage has {current_assistant_count} assistant messages, may have loaded history")
+                    
+            except Exception as e:
+                self._log(f"new_chat: navigation failed: {e}")
+        
+        # 等待 textarea 出现
+        t1 = time.time()
+        textarea_wait_s = 5.0
+        while time.time() - t1 < textarea_wait_s:
+            try:
                 has_textarea = await self.page.evaluate(
                     """() => {
                         const textarea = document.querySelector('#prompt-textarea');
@@ -754,36 +910,62 @@ class ChatGPTAdapter(SiteAdapter):
                     }"""
                 )
                 if has_textarea:
-                    elapsed = time.time() - t0
-                    self._log(f"new_chat: textarea appeared ({elapsed:.2f}s)")
+                    self._log(f"new_chat: textarea appeared ({time.time() - t1:.2f}s)")
                     break
             except Exception:
                 pass
-            
-            await asyncio.sleep(check_interval)
+            await asyncio.sleep(0.05)
         
-        # 如果高频轮询未找到，fallback到wait_for_selector（但超时时间更短）
-        if time.time() - t0 >= max_wait_s:
-            try:
-                await self.page.wait_for_selector("#prompt-textarea", timeout=5000, state="visible")
-                self._log("new_chat: textarea appeared (fallback)")
-            except Exception:
-                # 如果输入框未出现，等待页面加载完成
-                try:
-                    await self.page.wait_for_load_state("domcontentloaded", timeout=3000)
-                    # 等待网络空闲（但超时时间较短，避免长时间等待）
-                    try:
-                        await self.page.wait_for_load_state("networkidle", timeout=2000)
-                    except Exception:
-                        pass  # networkidle 超时不影响继续
-                except Exception:
-                    pass  # 页面加载超时不影响继续
-        
-        # 新聊天会重绘输入框，等待页面稳定（减少固定等待时间）
-        await asyncio.sleep(0.3)  # 从 0.5 秒减少到 0.3 秒，因为上面已经等待了关键元素
-        # 关闭可能的弹窗/遮罩
+        # P0-3 修复：增加 DOM 稳定等待，确保 textbox 可用
+        await asyncio.sleep(0.5)  # 增加等待时间（从 0.3 到 0.5）
         await self._dismiss_overlays()
-        await asyncio.sleep(0.2)  # 从 0.3 秒减少到 0.2 秒
+        await asyncio.sleep(0.3)  # 增加等待时间（从 0.2 到 0.3）
+        
+        # P0-3 修复：等待 textbox 真正可交互（不仅仅是可见）
+        t2 = time.time()
+        textbox_ready_wait_s = 3.0
+        textbox_ready = False
+        while time.time() - t2 < textbox_ready_wait_s:
+            try:
+                is_ready = await self.page.evaluate(
+                    """() => {
+                        const textarea = document.querySelector('#prompt-textarea');
+                        if (!textarea) return false;
+                        // 检查是否可见
+                        if (textarea.offsetParent === null) return false;
+                        // 检查是否可交互（不是 disabled 或 readonly）
+                        if (textarea.disabled || textarea.readOnly) return false;
+                        // 检查是否有父元素遮挡
+                        const rect = textarea.getBoundingClientRect();
+                        const centerX = rect.left + rect.width / 2;
+                        const centerY = rect.top + rect.height / 2;
+                        const topElement = document.elementFromPoint(centerX, centerY);
+                        // 如果中心点被其他元素遮挡，可能不可交互
+                        if (topElement && !textarea.contains(topElement) && topElement !== textarea) {
+                            // 检查遮挡元素是否是弹窗或对话框
+                            const tagName = topElement.tagName.toLowerCase();
+                            if (tagName === 'dialog' || topElement.getAttribute('role') === 'dialog') {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }"""
+                )
+                if is_ready:
+                    textbox_ready = True
+                    self._log(f"new_chat: textbox ready ({time.time() - t2:.2f}s)")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)
+        
+        if not textbox_ready:
+            self._log("new_chat: warning - textbox may not be fully ready")
+        
+        # 最终确认
+        final_url = self.page.url
+        final_assistant_count = await self._assistant_count()
+        self._log(f"new_chat: done (url={final_url}, assistant_count={final_assistant_count})")
 
     async def _assistant_count(self) -> int:
         """
@@ -822,12 +1004,17 @@ class ChatGPTAdapter(SiteAdapter):
             return 0
 
     async def _last_assistant_text(self) -> str:
+        """
+        获取最后一条 assistant 消息的文本。
+        修复：添加显式超时，避免默认 30 秒超时导致 Future exception was never retrieved。
+        """
         for sel in self.ASSISTANT_MSG:
             loc = self.page.locator(sel)
             try:
                 cnt = await loc.count()
                 if cnt > 0:
-                    return (await loc.nth(cnt - 1).inner_text()).strip()
+                    # 修复：使用显式超时（2秒），避免默认 30 秒超时导致 Future exception
+                    return (await loc.nth(cnt - 1).inner_text(timeout=2000)).strip()
             except Exception:
                 continue
         return ""
@@ -836,6 +1023,8 @@ class ChatGPTAdapter(SiteAdapter):
         """
         根据索引获取 assistant 消息文本（0-index）。
         当 assistant_count(after)=k 时，读取第 k-1 条消息（0-index）。
+        
+        修复：添加显式超时，避免默认 30 秒超时导致 Future exception was never retrieved。
         
         Args:
             index: 消息索引（0-index），例如 assistant_count=3 时，index=2 表示最后一条消息
@@ -851,8 +1040,8 @@ class ChatGPTAdapter(SiteAdapter):
             try:
                 cnt = await loc.count()
                 if cnt > 0 and index < cnt:
-                    # 使用索引定位，而不是 last
-                    text = await loc.nth(index).inner_text()
+                    # 修复：使用显式超时（2秒），避免默认 30 秒超时导致 Future exception
+                    text = await loc.nth(index).inner_text(timeout=2000)
                     if text:
                         return text.strip()
             except Exception:
@@ -980,6 +1169,26 @@ class ChatGPTAdapter(SiteAdapter):
         Returns:
             (response_text, page_url) 元组
         """
+        # 关键修复：如果是 Pro 模式，自动延长超时时间到 40 分钟（2400 秒）
+        # 因为 Pro 模式的思考时间可能很长
+        is_pro_mode = False
+        if model_version:
+            model_v_lower = model_version.strip().lower()
+            # 检查是否是 Pro 模式（包括 5.2pro, pro, gpt-5.2-pro 等）
+            is_pro_mode = (
+                "pro" in model_v_lower and "instant" not in model_v_lower
+            ) or "5.2pro" in model_v_lower or "5-2-pro" in model_v_lower or "gpt-5.2-pro" in model_v_lower
+        else:
+            # 如果没有指定 model_version，检查环境变量或默认变体
+            variant = self._desired_variant()
+            is_pro_mode = variant == "pro"
+        
+        # 如果是 Pro 模式，且超时时间小于 40 分钟，自动延长到 40 分钟
+        if is_pro_mode and timeout_s < 2400:
+            original_timeout = timeout_s
+            timeout_s = 2400  # 40 分钟
+            self._log(f"ask: Pro 模式检测到，自动延长超时时间从 {original_timeout}s 到 {timeout_s}s (40 分钟)")
+        
         async def _ask_inner() -> Tuple[str, str]:
             ask_start_time = time.time()
             self._log(f"ask: start (timeout={timeout_s}s, model_version={model_version or 'default'}, new_chat={new_chat})")
@@ -999,12 +1208,39 @@ class ChatGPTAdapter(SiteAdapter):
                 await self.new_chat()
                 # 新聊天后需要重新确保就绪
                 await self.ensure_ready()
-            
-            # 记录发送前的状态
-            n_assist0 = await self._assistant_count()
-            user0 = await self._user_count()
-            last_assist_text_before = await self._last_assistant_text()
-            self._log(f"ask: assistant_count(before)={n_assist0}, user_count(before)={user0}, last_assist_text_len(before)={len(last_assist_text_before)}")
+                # 关键修复：新聊天窗口打开后，等待一小段时间确保页面完全刷新
+                await asyncio.sleep(0.5)  # 等待页面稳定
+                
+                # 重新查询状态，确保获取的是新窗口的状态
+                n_assist0 = await self._assistant_count()
+                user0 = await self._user_count()
+                last_assist_text_before = await self._last_assistant_text()
+                
+                # 关键验证：新聊天窗口应该没有历史消息
+                if n_assist0 > 0 or user0 > 0:
+                    self._log(f"ask: WARNING - new_chat requested but messages exist (assistant={n_assist0}, user={user0})")
+                    self._log("ask: retrying new_chat with forced navigation...")
+                    # 强制再次尝试
+                    try:
+                        await self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=15000)
+                        await asyncio.sleep(1.0)
+                        await self._dismiss_overlays()
+                        await self.ensure_ready()
+                        # 再次查询状态
+                        n_assist0 = await self._assistant_count()
+                        user0 = await self._user_count()
+                        last_assist_text_before = await self._last_assistant_text()
+                        self._log(f"ask: after forced navigation - assistant_count={n_assist0}, user_count={user0}")
+                    except Exception as e:
+                        self._log(f"ask: forced navigation failed: {e}")
+                
+                self._log(f"ask: new chat opened, reset state - assistant_count(before)={n_assist0}, user_count(before)={user0}, last_assist_text_len(before)={len(last_assist_text_before)}")
+            else:
+                # 记录发送前的状态（非新聊天窗口）
+                n_assist0 = await self._assistant_count()
+                user0 = await self._user_count()
+                last_assist_text_before = await self._last_assistant_text()
+                self._log(f"ask: assistant_count(before)={n_assist0}, user_count(before)={user0}, last_assist_text_len(before)={len(last_assist_text_before)}")
             
             # 发送 prompt
             self._log("ask: sending prompt...")
@@ -1046,11 +1282,14 @@ class ChatGPTAdapter(SiteAdapter):
                 n_assist0=n_assist0,
                 ask_start_time=ask_start_time,
                 timeout_s=timeout_s,
+                last_assist_text_before=last_assist_text_before,
             )
         
         # 使用整体超时保护
+        # 关键修复：如果是 Pro 模式，额外增加缓冲时间（因为思考时间可能很长）
+        timeout_buffer = 10 if is_pro_mode else 5  # Pro 模式多给 10 秒缓冲
         try:
-            return await asyncio.wait_for(_ask_inner(), timeout=timeout_s + 5)  # 多给5秒缓冲
+            return await asyncio.wait_for(_ask_inner(), timeout=timeout_s + timeout_buffer)
         except asyncio.TimeoutError:
             await self.save_artifacts("ask_total_timeout")
             raise TimeoutError(f"ask: total timeout exceeded ({timeout_s}s)")
