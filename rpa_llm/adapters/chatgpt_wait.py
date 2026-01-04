@@ -643,8 +643,30 @@ class ChatGPTWaiter:
                                 final_text_fetched = True
                                 self._log(f"ask: final_text fetched successfully (len={len(final_text) if final_text else 0})")
                             except Exception as fetch_err:
-                                self._log(f"ask: ERROR fetching final_text (30s force): {fetch_err}")
-                                final_text = ""  # 如果拉取失败，返回空字符串
+                                self._log(f"ask: ERROR fetching final_text (30s force) via locator: {fetch_err}")
+                                final_text = ""
+                            
+                            # 关键修复：如果 Playwright locator 获取失败，尝试使用 JS evaluate 直接获取
+                            if not final_text or len(final_text) == 0:
+                                self._log(f"ask: locator failed (30s force), trying JS evaluate fallback (target_index={target_index})...")
+                                try:
+                                    js_result = await self.page.evaluate(
+                                        """(args) => {
+                                            const sel = args.sel;
+                                            const idx = args.idx;
+                                            const els = document.querySelectorAll(sel);
+                                            if (idx < 0 || idx >= els.length) return '';
+                                            return (els[idx].innerText || els[idx].textContent || '').trim();
+                                        }""",
+                                        {"sel": combined_sel, "idx": target_index}
+                                    )
+                                    if js_result and len(js_result) > 0:
+                                        final_text = js_result
+                                        self._log(f"ask: JS evaluate fallback succeeded (len={len(final_text)})")
+                                    else:
+                                        self._log(f"ask: JS evaluate fallback returned empty")
+                                except Exception as js_err:
+                                    self._log(f"ask: JS evaluate fallback failed: {js_err}")
                         
                         elapsed = time.time() - ask_start_time
                         self._log(f"ask: done (stabilized, total={elapsed:.1f}s, content unchanged for {time_since_change:.1f}s, len={current_len}, final_text_len={len(final_text) if final_text else 0})")
@@ -668,8 +690,30 @@ class ChatGPTWaiter:
                                 final_text_fetched = True
                                 self._log(f"ask: final_text fetched successfully (len={len(final_text) if final_text else 0})")
                             except Exception as fetch_err:
-                                self._log(f"ask: ERROR fetching final_text: {fetch_err}")
-                                final_text = ""  # 如果拉取失败，返回空字符串
+                                self._log(f"ask: ERROR fetching final_text via locator: {fetch_err}")
+                                final_text = ""
+                            
+                            # 关键修复：如果 Playwright locator 获取失败，尝试使用 JS evaluate 直接获取
+                            if not final_text or len(final_text) == 0:
+                                self._log(f"ask: locator failed, trying JS evaluate fallback (target_index={target_index})...")
+                                try:
+                                    js_result = await self.page.evaluate(
+                                        """(args) => {
+                                            const sel = args.sel;
+                                            const idx = args.idx;
+                                            const els = document.querySelectorAll(sel);
+                                            if (idx < 0 || idx >= els.length) return '';
+                                            return (els[idx].innerText || els[idx].textContent || '').trim();
+                                        }""",
+                                        {"sel": combined_sel, "idx": target_index}
+                                    )
+                                    if js_result and len(js_result) > 0:
+                                        final_text = js_result
+                                        self._log(f"ask: JS evaluate fallback succeeded (len={len(final_text)})")
+                                    else:
+                                        self._log(f"ask: JS evaluate fallback returned empty")
+                                except Exception as js_err:
+                                    self._log(f"ask: JS evaluate fallback failed: {js_err}")
                         
                         elapsed = time.time() - ask_start_time
                         self._log(f"ask: done (stabilized, total={elapsed:.1f}s, fast path: {time_since_change:.1f}s no change, len={current_len}, final_text_len={len(final_text) if final_text else 0})")
@@ -693,8 +737,30 @@ class ChatGPTWaiter:
                                 final_text_fetched = True
                                 self._log(f"ask: final_text fetched successfully (len={len(final_text) if final_text else 0})")
                             except Exception as fetch_err:
-                                self._log(f"ask: ERROR fetching final_text (normal path): {fetch_err}")
-                                final_text = ""  # 如果拉取失败，返回空字符串
+                                self._log(f"ask: ERROR fetching final_text (normal path) via locator: {fetch_err}")
+                                final_text = ""
+                            
+                            # 关键修复：如果 Playwright locator 获取失败，尝试使用 JS evaluate 直接获取
+                            if not final_text or len(final_text) == 0:
+                                self._log(f"ask: locator failed (normal path), trying JS evaluate fallback (target_index={target_index})...")
+                                try:
+                                    js_result = await self.page.evaluate(
+                                        """(args) => {
+                                            const sel = args.sel;
+                                            const idx = args.idx;
+                                            const els = document.querySelectorAll(sel);
+                                            if (idx < 0 || idx >= els.length) return '';
+                                            return (els[idx].innerText || els[idx].textContent || '').trim();
+                                        }""",
+                                        {"sel": combined_sel, "idx": target_index}
+                                    )
+                                    if js_result and len(js_result) > 0:
+                                        final_text = js_result
+                                        self._log(f"ask: JS evaluate fallback succeeded (len={len(final_text)})")
+                                    else:
+                                        self._log(f"ask: JS evaluate fallback returned empty")
+                                except Exception as js_err:
+                                    self._log(f"ask: JS evaluate fallback failed: {js_err}")
                         
                         elapsed = time.time() - ask_start_time
                         self._log(f"ask: done (stabilized, total={elapsed:.1f}s, len={current_len}, final_text_len={len(final_text) if final_text else 0})")
