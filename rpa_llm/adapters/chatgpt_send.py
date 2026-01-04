@@ -1388,18 +1388,24 @@ class ChatGPTSender:
         
         # Fallback：如果快路径失败，使用简化的按钮点击逻辑
         send_phase_max_s = float(os.environ.get("CHATGPT_SEND_PHASE_MAX_S", "8.0"))
-        if time.time() - send_phase_start >= send_phase_max_s:
-            self._log(f"send: send phase reached {send_phase_max_s:.1f}s, skipping button attempts to reduce latency")
-            return
+        elapsed_send_phase = time.time() - send_phase_start
+        if elapsed_send_phase >= send_phase_max_s:
+            # 关键修复：即使超时，也要尝试至少一次按钮点击
+            # 因为 Control+Enter 可能真的失败了，需要通过按钮发送
+            self._log(f"send: send phase reached {elapsed_send_phase:.1f}s (limit={send_phase_max_s:.1f}s), but will try button click once")
+            # 不再直接 return，继续尝试按钮
         
         # 简化版检查函数（用于 fallback）
         async def check_sent_simple() -> bool:
             return await self._fast_send_confirm(user_count_before_send, timeout_ms=500)
         
+        button_attempt_count = 0
         for send_sel in self.SEND_BTN:
-            if time.time() - send_phase_start >= send_phase_max_s:
-                self._log(f"send: send phase reached {send_phase_max_s:.1f}s, stopping button attempts")
+            # 关键修复：确保至少尝试一个按钮
+            if button_attempt_count > 0 and time.time() - send_phase_start >= send_phase_max_s + 10:
+                self._log(f"send: send phase exceeded {send_phase_max_s + 10:.1f}s after {button_attempt_count} button attempts, stopping")
                 return
+            button_attempt_count += 1
             
             if await check_sent_simple():
                 self._log(f"send: confirmed sent before button {send_sel}")
