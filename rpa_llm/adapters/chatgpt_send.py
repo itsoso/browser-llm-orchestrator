@@ -1400,12 +1400,14 @@ class ChatGPTSender:
             return await self._fast_send_confirm(user_count_before_send, timeout_ms=500)
         
         button_attempt_count = 0
+        self._log(f"send: starting button fallback, will try {len(self.SEND_BTN)} button selectors...")
         for send_sel in self.SEND_BTN:
-            # 关键修复：确保至少尝试一个按钮
-            if button_attempt_count > 0 and time.time() - send_phase_start >= send_phase_max_s + 10:
-                self._log(f"send: send phase exceeded {send_phase_max_s + 10:.1f}s after {button_attempt_count} button attempts, stopping")
+            # 关键修复：确保至少尝试一个按钮，给更多时间（30秒）
+            if button_attempt_count > 0 and time.time() - send_phase_start >= send_phase_max_s + 30:
+                self._log(f"send: send phase exceeded {send_phase_max_s + 30:.1f}s after {button_attempt_count} button attempts, stopping")
                 return
             button_attempt_count += 1
+            self._log(f"send: trying button selector {button_attempt_count}/{len(self.SEND_BTN)}: {send_sel}")
             
             if await check_sent_simple():
                 self._log(f"send: confirmed sent before button {send_sel}")
@@ -1413,7 +1415,9 @@ class ChatGPTSender:
             
             try:
                 btn = self.page.locator(send_sel).first
-                if await btn.count() > 0:
+                btn_count = await btn.count()
+                self._log(f"send: button {send_sel} count={btn_count}")
+                if btn_count > 0:
                     # 检查是否是停止按钮
                     try:
                         aria_label = await btn.get_attribute("aria-label") or ""
@@ -1453,12 +1457,17 @@ class ChatGPTSender:
                         raise
                     
                     self._log(f"send: clicked send button {send_sel}")
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.5)  # 增加等待时间
                     if await check_sent_simple():
                         self._log(f"send: confirmed sent after button {send_sel}")
                         return
-            except Exception:
+                    else:
+                        self._log(f"send: button {send_sel} clicked but send not confirmed, trying next...")
+                else:
+                    self._log(f"send: button {send_sel} not found (count=0)")
+            except Exception as btn_err:
+                self._log(f"send: button {send_sel} failed: {btn_err}")
                 continue
 
-        self._log("send: all send methods attempted (Enter/Control+Enter/Button)")
+        self._log("send: all send methods attempted (Enter/Control+Enter/Button), none confirmed")
 
