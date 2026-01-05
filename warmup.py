@@ -20,11 +20,12 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-# 尝试导入 stealth
+# 尝试导入 stealth (支持 2.0.0+ 版本)
 try:
-    from playwright_stealth import stealth_async
+    from playwright_stealth import Stealth
+    stealth_helper = Stealth()
 except ImportError:
-    stealth_async = None
+    stealth_helper = None
     print("⚠️  playwright-stealth 未安装，建议运行: pip install playwright-stealth")
 
 
@@ -57,10 +58,10 @@ SITES = {
         ],
     },
     "grok": {
-        "url": "https://x.com/i/grok",
+        "url": "https://grok.com/",
         "profile": "grok",
         "instructions": [
-            "1. 登录你的 X/Twitter 账号",
+            "1. 登录你的 Grok 账号",
             "2. 确保能看到 Grok 聊天界面",
         ],
     },
@@ -141,10 +142,10 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         page = pages[0] if pages else await context.new_page()
 
         # 注入 Stealth 脚本（如果可用）
-        if stealth_async:
+        if stealth_helper:
             try:
-                await stealth_async(page)
-                print("✅ Stealth 模式已启用\n")
+                await stealth_helper.apply_stealth_async(page)
+                print("✅ Stealth 模式已启用 (v2.0.0+)\n")
             except Exception as e:
                 print(f"⚠️  Stealth 模式启用失败: {e}\n")
         else:
