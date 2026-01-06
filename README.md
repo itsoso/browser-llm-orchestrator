@@ -312,7 +312,7 @@ python -m rpa_llm.cli --help
 
 ```bash
 # Chatlog API 示例
-curl "http://127.0.0.1:5030/api/v1/chatlog?time=2026-01-01~2026-01-07&talker=川群-2025&format=json"
+curl "http://127.0.0.1:5030/api/v1/chatlog?time=2026-01-01~2026-01-07&talker=xx群-2025&format=json"
 ```
 
 #### 2. 保存 Raw 文件
@@ -322,11 +322,11 @@ curl "http://127.0.0.1:5030/api/v1/chatlog?time=2026-01-01~2026-01-07&talker=川
 ```
 10_Sources/WeChat/
 └── 00-raws/
-    └── 川群-2025/
+    └── xx群-2025/
         └── 2026/
             └── 01/
                 └── 第1周/
-                    └── 川群-2025 2026-01-01~2026-01-07-raw.md
+                    └── xx群-2025 2026-01-01~2026-01-07-raw.md
 ```
 
 #### 3. LLM 分析
@@ -343,11 +343,11 @@ curl "http://127.0.0.1:5030/api/v1/chatlog?time=2026-01-01~2026-01-07&talker=川
 ```
 10_Sources/WeChat/
 └── 10-Summaries/
-    └── 川群-2025/
+    └── xx群-2025/
         └── 2026/
             └── 01/
                 └── 第1周/
-                    └── 川群-2025 第1周-2026-01-01~2026-01-07-Sum-5.2pro.md
+                    └── xx群-2025 第1周-2026-01-01~2026-01-07-Sum-5.2pro.md
 ```
 
 ### 快速使用
@@ -379,7 +379,7 @@ obsidian:
 ```bash
 # 分析指定日期范围的群聊
 python -m rpa_llm.chatlog_automation \
-  --talker "川群-2025" \
+  --talker "xx群-2025" \
   --start 2026-01-01 \
   --end 2026-01-07 \
   --config ./chatlog_automation.yaml
@@ -390,7 +390,7 @@ python -m rpa_llm.chatlog_automation \
 ```bash
 # 批量处理多周数据
 python rpa_llm/batch_weekly_analysis.py \
-  --talker "川群-2025" \
+  --talker "xx群-2025" \
   --year 2025 \
   --start-week 48 \
   --end-week 53 \
@@ -405,18 +405,18 @@ python rpa_llm/batch_weekly_analysis.py \
 ---
 type: weekly_review
 create: 2026-01-08T10:30:00+08:00
-group: 川群-2025
+group: xx群-2025
 week: 1
 period_start: 2026-01-01
 period_end: 2026-01-07
 source: "wechat chatlog"
-raw_note: '[[10_Sources/WeChat/00-raws/川群-2025/2026/01/第1周/川群-2025 2026-01-01~2026-01-07-raw]]'
+raw_note: '[[10_Sources/WeChat/00-raws/xx群-2025/2026/01/第1周/xx群-2025 2026-01-01~2026-01-07-raw]]'
 tags: [投资, 复盘, AI, ...]
 topics: [市场分析, 技术趋势, ...]
 key_people: [王川, ...]
 ---
 
-# 川群-2025 第1周 周期看板（2026.01.01～2026.01.07）
+# xx群-2025 第1周 周期看板（2026.01.01～2026.01.07）
 
 ## Step2 Digest：高信号摘要
 ...
@@ -435,7 +435,7 @@ key_people: [王川, ...]
 Summary 文件自动包含对 Raw 文件的 wikilink 引用：
 
 ```markdown
-raw_note: '[[10_Sources/WeChat/00-raws/川群-2025/2026/01/第1周/川群-2025 2026-01-01~2026-01-07-raw]]'
+raw_note: '[[10_Sources/WeChat/00-raws/xx群-2025/2026/01/第1周/xx群-2025 2026-01-01~2026-01-07-raw]]'
 ```
 
 点击即可跳转到原始聊天记录。
@@ -486,7 +486,7 @@ python -m rpa_llm.chatlog_automation --help
 
 | 参数 | 说明 | 示例 |
 |:---|:---|:---|
-| `--talker` | 群聊标识（必填） | `川群-2025` |
+| `--talker` | 群聊标识（必填） | `xx群-2025` |
 | `--start` | 开始日期 | `2026-01-01` |
 | `--end` | 结束日期 | `2026-01-07` |
 | `--config` | 配置文件路径 | `./chatlog_automation.yaml` |
