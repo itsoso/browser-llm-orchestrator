@@ -20,7 +20,7 @@ from .base import SiteAdapter
 
 class QianwenAdapter(SiteAdapter):
     site_id = "qianwen"
-    base_url = "https://www.qianwen.com/qianwen/"
+    base_url = "https://tongyi.aliyun.com/qianwen/"
 
     # 千问页面 UI 版本多：优先 form 内输入，再 textarea/role，再 contenteditable
     TEXTBOX_SELECTORS = [

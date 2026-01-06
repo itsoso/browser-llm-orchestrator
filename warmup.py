@@ -66,7 +66,7 @@ SITES = {
         ],
     },
     "qianwen": {
-        "url": "https://tongyi.aliyun.com/qianwen",
+        "url": "https://tongyi.aliyun.com/qianwen/",
         "profile": "qianwen",
         "instructions": [
             "1. 登录你的阿里云账号",
