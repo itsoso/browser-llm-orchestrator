@@ -8,12 +8,19 @@ chatlog:
 # LLM 分析配置
 llm:
   arbitrator_site: "chatgpt"  # 可选: chatgpt, gemini
-  model_version: "5.2pro"  # 用于文件名，不影响实际模型选择
-  task_timeout_s: 1200  # 超时时间（秒），默认 600（10分钟），Pro 版本建议 1200（20分钟）或更长
+  model_version: "5.2pro"  # 模型版本标识，可选: 5.2pro, 5.2thinking, 5.2instant
+  task_timeout_s: 2400  # 超时时间（秒），ChatGPT Pro 深度思考可能需要 20-30 分钟，建议 2400（40 分钟）
   new_chat: true  # 每次提交都打开新窗口
 
-# ChatGPT 模型变体（通过环境变量设置）
-# export CHATGPT_VARIANT=pro  # 可选: pro, thinking, instant
+# ChatGPT 5.2 模型变体说明：
+# - 5.2pro: 深度推理模式，耗时 20-30 分钟，适合复杂分析任务
+# - 5.2thinking: 平衡模式，耗时 10-15 分钟，适合一般分析任务
+# - 5.2instant: 快速响应模式，耗时 2-5 分钟，适合简单总结任务
+#
+# 通过环境变量设置模型变体：
+# export CHATGPT_VARIANT=pro      # 对应 5.2pro
+# export CHATGPT_VARIANT=thinking  # 对应 5.2thinking  
+# export CHATGPT_VARIANT=instant   # 对应 5.2instant
 
 # Obsidian 路径配置
 obsidian:

@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser LLM Orchestrator - 管理界面</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-running { background-color: #10b981; }
+        .status-stopped { background-color: #ef4444; }
+        .status-warning { background-color: #f59e0b; }
+        
+        .log-container {
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            padding: 16px;
+            border-radius: 8px;
+            max-height: 500px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 500;
+            transition: all 0.2s;
+            cursor: pointer;
+            border: none;
+        }
+        
+        .btn-primary {
+            background-color: #3b82f6;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background-color: #2563eb;
+        }
+        
+        .btn-danger {
+            background-color: #ef4444;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background-color: #dc2626;
+        }
+        
+        .btn-success {
+            background-color: #10b981;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background-color: #059669;
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .tab-button {
+            padding: 12px 24px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            font-weight: 500;
+            color: #6b7280;
+            transition: all 0.2s;
+        }
+        
+        .tab-button.active {
+            color: #3b82f6;
+            border-bottom-color: #3b82f6;
+        }
+        
+        .tab-button:hover {
+            color: #3b82f6;
+        }
+        
+        .input-field {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        .input-field:focus {
+            outline: none;
+            border-color: #3b82f6;
+            ring: 2px;
+            ring-color: #3b82f650;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm">
+            <div class="max-w-7xl mx-auto px-6 py-4">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h1 class="text-2xl font-bold text-gray-900">🤖 Browser LLM Orchestrator</h1>
+                        <p class="text-sm text-gray-600 mt-1">多 LLM 决策系统 Web 管理界面</p>
+                    </div>
+                    <div>
+                        <button onclick="refreshStatus()" class="btn btn-primary">
+                            🔄 刷新状态
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-6 py-8">
+            <!-- Status Card -->
+            <div class="card">
+                <h2 class="text-xl font-semibold mb-4">📊 系统状态</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <div class="flex items-center mb-2">
+                            <span id="driver-status-dot" class="status-dot status-stopped"></span>
+                            <span class="font-medium">Driver Server</span>
+                        </div>
+                        <div class="text-sm text-gray-600" id="driver-info">检查中...</div>
+                        <div class="mt-3 flex gap-2">
+                            <button onclick="startDriver()" id="btn-start-driver" class="btn btn-success text-sm">
+                                ▶️ 启动
+                            </button>
+                            <button onclick="stopDriver()" id="btn-stop-driver" class="btn btn-danger text-sm">
+                                ⏹️ 停止
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="font-medium mb-2">⚙️ 配置信息</div>
+                        <div class="text-sm text-gray-600">
+                            <div>站点: <span id="config-sites">-</span></div>
+                            <div>输出目录: <span id="config-output">-</span></div>
+                            <div>最后更新: <span id="status-timestamp">-</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="card">
+                <div class="border-b border-gray-200 mb-6">
+                    <div class="flex">
+                        <button class="tab-button active" onclick="showTab('warmup')">
+                            🔥 站点预热
+                        </button>
+                        <button class="tab-button" onclick="showTab('chatlog')">
+                            💬 Chatlog 自动化
+                        </button>
+                        <button class="tab-button" onclick="showTab('logs')">
+                            📝 日志查看
+                        </button>
+                        <button class="tab-button" onclick="showTab('config')">
+                            ⚙️ 配置管理
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Warmup Tab -->
+                <div id="tab-warmup" class="tab-content">
+                    <h3 class="text-lg font-semibold mb-4">站点预热（首次登录）</h3>
+                    <p class="text-sm text-gray-600 mb-4">
+                        首次使用前，需要预热各个站点并手动登录保存 Session。
+                    </p>
+                    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                        <button onclick="warmupSite('chatgpt')" class="btn btn-primary">
+                            ChatGPT
+                        </button>
+                        <button onclick="warmupSite('gemini')" class="btn btn-primary">
+                            Gemini
+                        </button>
+                        <button onclick="warmupSite('grok')" class="btn btn-primary">
+                            Grok
+                        </button>
+                        <button onclick="warmupSite('perplexity')" class="btn btn-primary">
+                            Perplexity
+                        </button>
+                        <button onclick="warmupSite('qianwen')" class="btn btn-primary">
+                            通义千问
+                        </button>
+                    </div>
+                    <div id="warmup-output" class="mt-6 log-container hidden"></div>
+                </div>
+
+                <!-- Chatlog Tab -->
+                <div id="tab-chatlog" class="tab-content hidden">
+                    <h3 class="text-lg font-semibold mb-4">Chatlog 群聊自动化分析</h3>
+                    <form onsubmit="runChatlog(event)" class="space-y-4">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    群聊标识 *
+                                </label>
+                                <input type="text" id="chatlog-talker" class="input-field" 
+                                       placeholder="例如: xx群-2025" required>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    开始日期 *
+                                </label>
+                                <input type="date" id="chatlog-start" class="input-field" required>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    结束日期 *
+                                </label>
+                                <input type="date" id="chatlog-end" class="input-field" required>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    模型版本
+                                </label>
+                                <select id="chatlog-model" class="input-field">
+                                    <option value="5.2pro">ChatGPT 5.2 Pro（深度推理，20-30分钟）</option>
+                                    <option value="5.2thinking">ChatGPT 5.2 Thinking（平衡模式）</option>
+                                    <option value="5.2instant">ChatGPT 5.2 Instant（快速响应）</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    模板路径（可选）
+                                </label>
+                                <input type="text" id="chatlog-template" class="input-field" 
+                                       placeholder="默认使用 templates/chatlog_for_wechat.md">
+                            </div>
+                        </div>
+                        <div class="flex items-center">
+                            <input type="checkbox" id="chatlog-newchat" checked class="mr-2">
+                            <label for="chatlog-newchat" class="text-sm text-gray-700">
+                                每次打开新对话窗口
+                            </label>
+                        </div>
+                        <div>
+                            <button type="submit" class="btn btn-success">
+                                🚀 开始分析
+                            </button>
+                        </div>
+                    </form>
+                    <div id="chatlog-result" class="mt-6 hidden">
+                        <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+                            <p class="text-green-800">✅ Chatlog 自动化已启动</p>
+                            <p class="text-sm text-green-700 mt-1">
+                                日志文件: <span id="chatlog-logfile"></span>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Logs Tab -->
+                <div id="tab-logs" class="tab-content hidden">
+                    <h3 class="text-lg font-semibold mb-4">日志查看</h3>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">
+                            日志类型
+                        </label>
+                        <select id="log-type" onchange="loadLogs()" class="input-field">
+                            <option value="driver">Driver Server</option>
+                            <option value="chatlog_automation">Chatlog 自动化</option>
+                            <option value="chatlog_web">Web 触发的 Chatlog</option>
+                        </select>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">
+                            最近的日志文件
+                        </label>
+                        <select id="log-files" onchange="viewLog()" class="input-field">
+                            <option value="">-- 选择日志文件 --</option>
+                        </select>
+                    </div>
+                    <div id="log-content" class="log-container"></div>
+                </div>
+
+                <!-- Config Tab -->
+                <div id="tab-config" class="tab-content hidden">
+                    <h3 class="text-lg font-semibold mb-4">配置管理</h3>
+                    <div class="space-y-6">
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="font-medium">brief.yaml</h4>
+                                <button onclick="loadConfigBrief()" class="text-sm text-blue-600 hover:text-blue-700">
+                                    🔄 刷新
+                                </button>
+                            </div>
+                            <pre id="config-brief" class="log-container">加载中...</pre>
+                        </div>
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="font-medium">chatlog_automation.yaml</h4>
+                                <button onclick="loadConfigChatlog()" class="text-sm text-blue-600 hover:text-blue-700">
+                                    🔄 刷新
+                                </button>
+                            </div>
+                            <pre id="config-chatlog" class="log-container">加载中...</pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // 全局状态
+        let currentTab = 'warmup';
+        let statusRefreshInterval = null;
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            refreshStatus();
+            loadLogs();
+            loadConfigBrief();
+            loadConfigChatlog();
+            
+            // 设置默认日期（昨天到今天）
+            const today = new Date();
+            const yesterday = new Date(today);
+            yesterday.setDate(yesterday.getDate() - 1);
+            
+            document.getElementById('chatlog-end').value = today.toISOString().split('T')[0];
+            document.getElementById('chatlog-start').value = yesterday.toISOString().split('T')[0];
+            
+            // 自动刷新状态（每 5 秒）
+            statusRefreshInterval = setInterval(refreshStatus, 5000);
+        });
+
+        // Tab 切换
+        function showTab(tabName) {
+            currentTab = tabName;
+            
+            // 隐藏所有 tab
+            document.querySelectorAll('.tab-content').forEach(el => {
+                el.classList.add('hidden');
+            });
+            
+            // 移除所有激活状态
+            document.querySelectorAll('.tab-button').forEach(el => {
+                el.classList.remove('active');
+            });
+            
+            // 显示当前 tab
+            document.getElementById(`tab-${tabName}`).classList.remove('hidden');
+            event.target.classList.add('active');
+        }
+
+        // 刷新状态
+        async function refreshStatus() {
+            try {
+                const response = await axios.get('/api/status');
+                const data = response.data;
+                
+                // 更新 Driver Server 状态
+                const driver = data.driver;
+                const statusDot = document.getElementById('driver-status-dot');
+                const driverInfo = document.getElementById('driver-info');
+                
+                if (driver.running && driver.ok) {
+                    statusDot.className = 'status-dot status-running';
+                    driverInfo.innerHTML = `
+                        运行中 ✅<br>
+                        <span class="text-xs">站点: ${driver.sites.join(', ')}</span><br>
+                        <span class="text-xs">URL: ${driver.url}</span>
+                    `;
+                    document.getElementById('btn-start-driver').disabled = true;
+                    document.getElementById('btn-stop-driver').disabled = false;
+                } else {
+                    statusDot.className = 'status-dot status-stopped';
+                    driverInfo.innerHTML = `未运行 ❌<br><span class="text-xs">${driver.error || '未启动'}</span>`;
+                    document.getElementById('btn-start-driver').disabled = false;
+                    document.getElementById('btn-stop-driver').disabled = true;
+                }
+                
+                // 更新配置信息
+                document.getElementById('config-sites').textContent = data.brief.sites.join(', ') || '-';
+                document.getElementById('config-output').textContent = data.brief.output_dir || '-';
+                document.getElementById('status-timestamp').textContent = new Date(data.timestamp).toLocaleString('zh-CN');
+                
+            } catch (error) {
+                console.error('刷新状态失败:', error);
+            }
+        }
+
+        // 启动 Driver Server
+        async function startDriver() {
+            try {
+                document.getElementById('btn-start-driver').disabled = true;
+                document.getElementById('btn-start-driver').textContent = '⏳ 启动中...';
+                
+                const response = await axios.post('/api/driver/start');
+                
+                if (response.data.ok) {
+                    alert('✅ Driver Server 已启动！\nPID: ' + response.data.pid);
+                    await refreshStatus();
+                } else {
+                    alert('❌ 启动失败: ' + response.data.error);
+                }
+            } catch (error) {
+                alert('❌ 启动失败: ' + (error.response?.data?.error || error.message));
+            } finally {
+                document.getElementById('btn-start-driver').textContent = '▶️ 启动';
+                await refreshStatus();
+            }
+        }
+
+        // 停止 Driver Server
+        async function stopDriver() {
+            if (!confirm('确定要停止 Driver Server 吗？')) {
+                return;
+            }
+            
+            try {
+                document.getElementById('btn-stop-driver').disabled = true;
+                document.getElementById('btn-stop-driver').textContent = '⏳ 停止中...';
+                
+                const response = await axios.post('/api/driver/stop');
+                
+                if (response.data.ok) {
+                    alert('✅ Driver Server 已停止！');
+                    await refreshStatus();
+                } else {
+                    alert('❌ 停止失败: ' + response.data.error);
+                }
+            } catch (error) {
+                alert('❌ 停止失败: ' + (error.response?.data?.error || error.message));
+            } finally {
+                document.getElementById('btn-stop-driver').textContent = '⏹️ 停止';
+                await refreshStatus();
+            }
+        }
+
+        // 预热站点
+        async function warmupSite(site) {
+            const outputDiv = document.getElementById('warmup-output');
+            outputDiv.classList.remove('hidden');
+            outputDiv.textContent = `🔥 正在预热 ${site}...\n请在打开的浏览器窗口中手动登录...\n`;
+            
+            try {
+                const response = await axios.post(`/api/warmup/${site}`);
+                
+                if (response.data.ok) {
+                    outputDiv.textContent += `\n✅ ${site} 预热成功！\n\n`;
+                    outputDiv.textContent += response.data.stdout;
+                } else {
+                    outputDiv.textContent += `\n❌ ${site} 预热失败！\n\n`;
+                    outputDiv.textContent += response.data.stderr || response.data.error;
+                }
+            } catch (error) {
+                outputDiv.textContent += `\n❌ 请求失败: ${error.message}\n`;
+            }
+        }
+
+        // 运行 Chatlog 自动化
+        async function runChatlog(event) {
+            event.preventDefault();
+            
+            const talker = document.getElementById('chatlog-talker').value;
+            const start = document.getElementById('chatlog-start').value;
+            const end = document.getElementById('chatlog-end').value;
+            const model = document.getElementById('chatlog-model').value;
+            const template = document.getElementById('chatlog-template').value;
+            const newChat = document.getElementById('chatlog-newchat').checked;
+            
+            try {
+                const response = await axios.post('/api/chatlog/run', {
+                    talker, start, end,
+                    model_version: model,
+                    template: template || null,
+                    new_chat: newChat
+                });
+                
+                if (response.data.ok) {
+                    document.getElementById('chatlog-result').classList.remove('hidden');
+                    document.getElementById('chatlog-logfile').textContent = response.data.log_file;
+                    
+                    // 3秒后自动切换到日志tab
+                    setTimeout(() => {
+                        showTab('logs');
+                        document.getElementById('log-type').value = 'chatlog_web';
+                        loadLogs();
+                    }, 3000);
+                } else {
+                    alert('❌ 启动失败: ' + response.data.error);
+                }
+            } catch (error) {
+                alert('❌ 请求失败: ' + (error.response?.data?.error || error.message));
+            }
+        }
+
+        // 加载日志列表
+        async function loadLogs() {
+            const logType = document.getElementById('log-type').value;
+            const select = document.getElementById('log-files');
+            
+            try {
+                const response = await axios.get(`/api/logs/${logType}`);
+                
+                if (response.data.ok) {
+                    select.innerHTML = '<option value="">-- 选择日志文件 --</option>';
+                    response.data.logs.forEach(log => {
+                        const option = document.createElement('option');
+                        option.value = log.name;
+                        option.textContent = `${log.name} (${log.modified}, ${(log.size / 1024).toFixed(1)} KB)`;
+                        select.appendChild(option);
+                    });
+                }
+            } catch (error) {
+                console.error('加载日志列表失败:', error);
+            }
+        }
+
+        // 查看日志
+        async function viewLog() {
+            const filename = document.getElementById('log-files').value;
+            if (!filename) return;
+            
+            const contentDiv = document.getElementById('log-content');
+            contentDiv.textContent = '加载中...';
+            
+            try {
+                const response = await axios.get(`/api/logs/view/${filename}`);
+                
+                if (response.data.ok) {
+                    contentDiv.textContent = response.data.content;
+                    // 自动滚动到底部
+                    contentDiv.scrollTop = contentDiv.scrollHeight;
+                } else {
+                    contentDiv.textContent = '❌ 加载失败: ' + response.data.error;
+                }
+            } catch (error) {
+                contentDiv.textContent = '❌ 请求失败: ' + error.message;
+            }
+        }
+
+        // 加载配置
+        async function loadConfigBrief() {
+            const pre = document.getElementById('config-brief');
+            pre.textContent = '加载中...';
+            
+            try {
+                const response = await axios.get('/api/config/brief');
+                if (response.data.ok) {
+                    pre.textContent = JSON.stringify(response.data.config, null, 2);
+                } else {
+                    pre.textContent = '❌ 加载失败: ' + response.data.error;
+                }
+            } catch (error) {
+                pre.textContent = '❌ 请求失败: ' + error.message;
+            }
+        }
+
+        async function loadConfigChatlog() {
+            const pre = document.getElementById('config-chatlog');
+            pre.textContent = '加载中...';
+            
+            try {
+                const response = await axios.get('/api/config/chatlog');
+                if (response.data.ok) {
+                    pre.textContent = JSON.stringify(response.data.config, null, 2);
+                } else {
+                    pre.textContent = '❌ 加载失败: ' + response.data.error;
+                }
+            } catch (error) {
+                pre.textContent = '❌ 请求失败: ' + error.message;
+            }
+        }
+    </script>
+</body>
+</html>
+

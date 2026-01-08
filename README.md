@@ -19,7 +19,7 @@
 
 | 平台 | 状态 | 说明 |
 |:---|:---:|:---|
-| **ChatGPT** | ✅ | 支持模型版本切换（5.2 Pro / 5.2 Instant / Thinking） |
+| **ChatGPT** | ✅ | 支持模型版本切换（5.2 Pro / 5.2 Thinking / 5.2 Instant） |
 | **Gemini** | ✅ | Google AI 平台 |
 | **Perplexity** | ✅ | 搜索增强型 AI |
 | **Grok** | ✅ | X/Twitter AI |
@@ -148,7 +148,20 @@ driver_server:
 
 ## 启动 Driver Server
 
-### 方式1：从 brief.yaml 读取配置（推荐）
+### 方式1：自动检查并启动（推荐）
+
+使用辅助脚本自动检查 Driver Server 状态：
+
+```bash
+# Python 脚本（跨平台）
+python ensure_driver.py --brief ./brief.yaml --background --wait
+
+# Bash 包装脚本（macOS/Linux）
+./run_with_driver.sh python -m rpa_llm.cli --brief ./brief.yaml
+```
+
+### 方式2：手动启动
+
 ```bash
 # 启动前检查预热状态（可选）
 PYTHONUNBUFFERED=1 python -u start_driver.py --brief ./brief.yaml --check-warmup
@@ -189,7 +202,7 @@ export RPA_DRIVER_URL="http://127.0.0.1:27125"
 PYTHONUNBUFFERED=1 python -u -m rpa_llm.cli --brief ./brief.yaml
 ```
 
-或者直接在 brief.yaml 中配置 `driver_url`，无需设置环境变量。
+或者直接在 brief.yaml 中配置 `driver_url`，无需设置环境变量。 ·
 
 ### 高级功能
 
@@ -198,20 +211,20 @@ PYTHONUNBUFFERED=1 python -u -m rpa_llm.cli --brief ./brief.yaml
 使用 `--model-version` 参数可以覆盖 `brief.yaml` 中的模型版本配置：
 
 ```bash
-# 使用 ChatGPT 5.2 Pro
+# 使用 ChatGPT 5.2 Pro（深度推理，20-30分钟）
 python -m rpa_llm.cli --brief ./brief.yaml --model-version 5.2pro
 
-# 使用 ChatGPT 5.2 Instant
-python -m rpa_llm.cli --brief ./brief.yaml --model-version 5.2instant
+# 使用 ChatGPT 5.2 Thinking（平衡模式，10-15分钟）
+python -m rpa_llm.cli --brief ./brief.yaml --model-version 5.2thinking
 
-# 使用 Thinking 模式
-python -m rpa_llm.cli --brief ./brief.yaml --model-version thinking
+# 使用 ChatGPT 5.2 Instant（快速响应，2-5分钟）
+python -m rpa_llm.cli --brief ./brief.yaml --model-version 5.2instant
 ```
 
 **支持的模型版本：**
-- `5.2pro` - ChatGPT 5.2 Pro（研究级智能模型）
-- `5.2instant` - ChatGPT 5.2 Instant（快速响应）
-- `thinking` - Thinking 模式（深度思考）
+- `5.2pro` - **ChatGPT 5.2 Pro**（深度推理模式，20-30分钟，最深入的分析）✨ 推荐
+- `5.2thinking` - **ChatGPT 5.2 Thinking**（平衡模式，10-15分钟，一般分析任务）
+- `5.2instant` - **ChatGPT 5.2 Instant**（快速响应模式，2-5分钟，简单总结任务）
 
 **注意：**
 - 如果 `brief.yaml` 中配置了 `output.site_model_versions`，CLI 参数会覆盖 ChatGPT 站点的配置
@@ -377,7 +390,14 @@ obsidian:
 #### 单次运行
 
 ```bash
-# 分析指定日期范围的群聊
+# 方式1：自动确保 Driver Server 运行（推荐）
+./run_with_driver.sh python -m rpa_llm.chatlog_automation \
+  --talker "xx群-2025" \
+  --start 2026-01-01 \
+  --end 2026-01-07 \
+  --config ./chatlog_automation.yaml
+
+# 方式2：手动启动（需要先启动 Driver Server）
 python -m rpa_llm.chatlog_automation \
   --talker "xx群-2025" \
   --start 2026-01-01 \
@@ -506,5 +526,39 @@ python -m rpa_llm.chatlog_automation --help
 # 2. 启动 Driver Server
 python start_driver.py --brief ./brief.yaml
 # 3. 运行自动化分析
-python -m rpa_llm.chatlog_automation --talker "群名" --start 2026-01-01 --end 2026-01-07
+python -m rpa_llm.chatlog_automation --talker "xx群" --start 2026-01-01 --end 2026-01-07
 ```
+
+---
+
+## 🌐 Web 管理界面（推荐）
+
+**一键启动可视化管理界面**：
+
+```bash
+python web_admin.py
+```
+
+访问 **http://127.0.0.1:5050** 即可通过浏览器管理整个系统！
+
+**功能特性**：
+- 📊 **实时状态监控** - Driver Server 状态、站点连接情况
+- 🔥 **可视化预热** - 一键预热所有 LLM 站点
+- 💬 **表单化执行** - 通过表单配置和执行 Chatlog 分析
+- 📝 **日志查看** - 在线查看所有运行日志
+- ⚙️ **配置管理** - 查看和管理系统配置
+
+详细使用指南：[WEB_ADMIN_USAGE.md](./WEB_ADMIN_USAGE.md) ⭐⭐⭐
+
+---
+
+## 📚 相关文档
+
+- **[WEB_ADMIN_USAGE.md](./WEB_ADMIN_USAGE.md) - Web 管理界面使用指南** ⭐⭐⭐ (新手推荐)
+- **[CHATGPT_MODEL_VERSIONS.md](./CHATGPT_MODEL_VERSIONS.md) - ChatGPT 5.2 模型版本详解** ⭐⭐
+- **[LONG_TEXT_HANDLING.md](./LONG_TEXT_HANDLING.md) - 长文本输入处理指南** ⭐ (遇到截断问题必读)
+- [CLI_USAGE_EXAMPLES.md](./CLI_USAGE_EXAMPLES.md) - CLI 详细用法示例
+- [CHATLOG_USAGE_EXAMPLE.md](./CHATLOG_USAGE_EXAMPLE.md) - Chatlog 集成详细示例
+- [DRIVER_HELPER_USAGE.md](./DRIVER_HELPER_USAGE.md) - Driver Server 辅助工具使用指南
+- [LOGGING.md](./LOGGING.md) - 日志系统说明
+- [REFACTORING_SUMMARY.md](./REFACTORING_SUMMARY.md) - 重构总结

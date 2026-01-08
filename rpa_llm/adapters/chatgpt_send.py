@@ -516,7 +516,17 @@ class ChatGPTSender:
         except Exception:
             pass
 
-        # 3. 循环尝试写入 (最多 2 次)
+        # 3. 检查 prompt 长度，ChatGPT 输入框有大约 10000 字符的限制
+        prompt_len = len(prompt)
+        CHATGPT_INPUT_LIMIT = 10000  # ChatGPT 输入框的近似字符限制
+        
+        if prompt_len > CHATGPT_INPUT_LIMIT:
+            self._log(f"⚠️  警告: Prompt 长度 ({prompt_len}) 超过 ChatGPT 输入框限制 (~{CHATGPT_INPUT_LIMIT})")
+            self._log(f"⚠️  建议: 使用文件上传或分段输入。当前将尝试输入，但可能被截断。")
+            # 可以在这里选择截断或报错
+            # 目前先尝试输入，让用户知道可能有问题
+        
+        # 4. 循环尝试写入 (最多 2 次)
         prompt_sent = False
         already_sent_during_input = False  # 标记是否在输入过程中已经发送
         for attempt in range(2):
@@ -767,6 +777,19 @@ class ChatGPTSender:
                             # 因为 _tb_set_text 内部已经有超时控制
                             await self._tb_set_text(tb, prompt)
                             self._log(f"send: set text via _tb_set_text (len={prompt_len})")
+                            
+                            # 验证实际输入的内容长度
+                            try:
+                                actual_text = await asyncio.wait_for(self._tb_get_text(tb), timeout=2.0)
+                                actual_len = len(actual_text) if actual_text else 0
+                                if actual_len < prompt_len * 0.9:  # 如果实际长度小于预期的 90%
+                                    self._log(f"⚠️  警告: 输入可能被截断！预期 {prompt_len} 字符，实际 {actual_len} 字符")
+                                    self._log(f"⚠️  这可能是因为 ChatGPT 输入框有字符数限制（约 10000 字符）")
+                                else:
+                                    self._log(f"✓ 输入验证通过: 实际输入 {actual_len}/{prompt_len} 字符")
+                            except Exception as verify_err:
+                                self._log(f"输入验证失败: {verify_err}，继续执行")
+                            
                             type_success = True
                         except (asyncio.TimeoutError, RuntimeError, Exception) as set_text_err:
                             # 优化：如果是 TargetClosedError，直接抛出，避免 Future exception

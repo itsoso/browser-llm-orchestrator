@@ -4,3 +4,6 @@ playwright-stealth>=1.0.6
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 httpx>=0.25.0  # Chatlog HTTP 客户端依赖
+Flask>=3.0.0  # Web 管理界面
+flask-cors>=4.0.0  # Web 管理界面 CORS 支持
+psutil>=5.9.0  # 进程管理

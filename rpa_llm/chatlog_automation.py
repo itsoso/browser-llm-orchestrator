@@ -345,21 +345,24 @@ async def load_template_and_generate_prompt(
             if placeholder == "{{conversation_content}}":
                 print(f"[{beijing_now_iso()}] [automation] 替换占位符 {placeholder} (内容长度: {len(value)} 字符)")
     
-    # 验证 conversation_content 是否被替换
-    if has_conversation_placeholder:
-        if "{{conversation_content}}" in template:
-            print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: {{conversation_content}} 占位符未被替换！")
-            # 尝试手动替换
-            template = template.replace("{{conversation_content}}", raw_content)
-            print(f"[{beijing_now_iso()}] [automation] 手动替换 {{conversation_content}} 成功")
-        else:
-            # 验证替换后的内容是否包含聊天内容
-            if raw_content_len > 0:
-                content_preview = raw_content[:100].strip()
-                if content_preview and content_preview not in template:
-                    print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: 替换后模板中未找到聊天内容预览")
-                else:
-                    print(f"[{beijing_now_iso()}] [automation] ✓ {{conversation_content}} 占位符已成功替换")
+        # 验证 conversation_content 是否被替换
+        if has_conversation_placeholder:
+            if "{{conversation_content}}" in template:
+                print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: {{conversation_content}} 占位符未被替换！")
+                # 尝试手动替换
+                template = template.replace("{{conversation_content}}", raw_content)
+                print(f"[{beijing_now_iso()}] [automation] 手动替换 {{conversation_content}} 成功")
+            else:
+                # 验证替换后的内容是否包含聊天内容
+                if raw_content_len > 0:
+                    content_preview = raw_content[:100].strip()
+                    print(f"[{beijing_now_iso()}] [automation] 🔍 验证: 模板长度={len(template)}, raw内容长度={raw_content_len}")
+                    print(f"[{beijing_now_iso()}] [automation] 🔍 Raw内容预览(前100字): {content_preview}")
+                    if content_preview and content_preview not in template:
+                        print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: 替换后模板中未找到聊天内容预览")
+                        print(f"[{beijing_now_iso()}] [automation] 🔍 模板前500字: {template[:500]}")
+                    else:
+                        print(f"[{beijing_now_iso()}] [automation] ✓ {{conversation_content}} 占位符已成功替换")
     
     # 再替换 {} 格式的占位符（Python format）- 注意：此时 {{}} 格式已经被替换了
     # 使用 safe_format 避免 KeyError，只替换存在的占位符
@@ -565,6 +568,25 @@ async def run_automation(
         
         # 读取 raw 文件内容（用于生成 prompt）
         raw_content = raw_path.read_text(encoding="utf-8")
+        
+        # 优化：去除 frontmatter 和无用的标题，节省字符数（ChatGPT 输入框限制约 10K 字符）
+        import re
+        original_len = len(raw_content)
+        
+        # 去除 YAML frontmatter（以 --- 开始和结束的部分）
+        raw_content = re.sub(r'^---\s*\n.*?\n---\s*\n', '', raw_content, flags=re.DOTALL)
+        
+        # 去除标题（# 与 xx 的聊天记录）
+        raw_content = re.sub(r'^# 与.*?的聊天记录\s*\n', '', raw_content, flags=re.MULTILINE)
+        
+        # 去除时间范围行
+        raw_content = re.sub(r'^时间范围：.*?\n', '', raw_content, flags=re.MULTILINE)
+        
+        # 去除 "## 对话内容" 标题
+        raw_content = re.sub(r'^## 对话内容\s*\n', '', raw_content, flags=re.MULTILINE)
+        
+        cleaned_len = len(raw_content)
+        print(f"[{beijing_now_iso()}] [automation] ✓ Raw 内容优化: {original_len} → {cleaned_len} 字符 (节省 {original_len - cleaned_len})")
         
         # 步骤 3: 从 template 生成 prompt
         week = get_week_number(start)
