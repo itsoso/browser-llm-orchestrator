@@ -331,11 +331,11 @@
                                 <div class="grid grid-cols-2 gap-2">
                                     <div>
                                         <label class="block text-xs text-gray-500 mb-1">开始日期</label>
-                                        <input type="date" id="recap-date-start" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
+                                        <input type="date" id="recap-date-start" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
                                     </div>
                                     <div>
                                         <label class="block text-xs text-gray-500 mb-1">结束日期</label>
-                                        <input type="date" id="recap-date-end" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
+                                        <input type="date" id="recap-date-end" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
                                     </div>
                                 </div>
                                 <p class="text-xs text-gray-500 mt-1">💡 提示：选择相同日期可分析单天</p>
@@ -374,7 +374,7 @@
                                 <label class="block text-sm font-medium text-gray-700 mb-2">
                                     模型版本
                                 </label>
-                                <select id="recap-model" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
+                                <select id="recap-model" class="w-full px-3 py-2 border border-gray-300 rounded-md">
                                     <option value="5.2instant">ChatGPT 5.2 Instant (快速)</option>
                                     <option value="5.2thinking">ChatGPT 5.2 Thinking (深度思考)</option>
                                     <option value="5.2pro">ChatGPT 5.2 Pro (最佳质量)</option>
@@ -385,7 +385,7 @@
                                 <label class="block text-sm font-medium text-gray-700 mb-2">
                                     Prompt 模板
                                 </label>
-                                <select id="recap-template" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
+                                <select id="recap-template" class="w-full px-3 py-2 border border-gray-300 rounded-md">
                                     <option value="">-- 使用默认模板 --</option>
                                     <!-- 动态加载模板列表 -->
                                 </select>
@@ -1474,29 +1474,6 @@
             }
         }
         
-        // 生成 Obsidian URI 链接
-        function generateObsidianUri(filePath) {
-            if (!filePath) return null;
-            
-            // Obsidian vault 名称（从路径中提取）
-            // 假设路径格式：/Users/xxx/work/personal/obsidian/personal/10_Sources/...
-            // vault 名称是 "personal"
-            const vaultMatch = filePath.match(/obsidian\/([^\/]+)\//);
-            if (!vaultMatch) return null;
-            
-            const vaultName = vaultMatch[1];
-            
-            // 提取相对于 vault 的文件路径
-            const vaultPath = filePath.substring(filePath.indexOf(`obsidian/${vaultName}/`) + `obsidian/${vaultName}/`.length);
-            
-            // 构建 Obsidian URI
-            // obsidian://open?vault=VAULT_NAME&file=FILE_PATH
-            const encodedVault = encodeURIComponent(vaultName);
-            const encodedFile = encodeURIComponent(vaultPath.replace(/\.md$/, '')); // Obsidian 不需要 .md 后缀
-            
-            return `obsidian://open?vault=${encodedVault}&file=${encodedFile}`;
-        }
-        
         async function showBatchDetail(batchId) {
             try {
                 const response = await axios.get(`/api/recap/batch/${batchId}`);
@@ -1518,31 +1495,6 @@
                             statusIcon = '⏸';
                         }
                         
-                        // 生成 Obsidian 链接
-                        let resultPathHtml = '';
-                        if (task.result_path) {
-                            const obsidianUri = generateObsidianUri(task.result_path);
-                            // 获取文件名用于显示
-                            const fileName = task.result_path.split('/').pop();
-                            
-                            if (obsidianUri) {
-                                resultPathHtml = `
-                                    <div class="mt-2 p-2 bg-purple-50 border border-purple-200 rounded">
-                                        <a href="${obsidianUri}" class="flex items-center gap-2 text-purple-700 hover:text-purple-900" title="点击在 Obsidian 中打开">
-                                            <span class="text-lg">🔮</span>
-                                            <div class="flex-1 min-w-0">
-                                                <div class="text-sm font-medium truncate">在 Obsidian 中打开</div>
-                                                <div class="text-xs text-purple-500 truncate">${fileName}</div>
-                                            </div>
-                                            <span class="text-purple-400">→</span>
-                                        </a>
-                                    </div>
-                                `;
-                            } else {
-                                resultPathHtml = `<div class="text-xs text-blue-600 mt-1">📄 ${task.result_path}</div>`;
-                            }
-                        }
-                        
                         tasksHtml += `
                             <div class="border-b border-gray-200 py-3">
                                 <div class="flex justify-between items-center">
@@ -1550,7 +1502,7 @@
                                     <span class="text-xs text-gray-500">${task.message_count || 0} 条消息</span>
                                 </div>
                                 ${task.error_message ? `<div class="text-xs text-red-600 mt-1">错误: ${task.error_message}</div>` : ''}
-                                ${resultPathHtml}
+                                ${task.result_path ? `<div class="text-xs text-blue-600 mt-1">📄 ${task.result_path}</div>` : ''}
                             </div>
                         `;
                     });

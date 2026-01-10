@@ -1,0 +1,24 @@
+{
+  "batch_id": "20260110_161828",
+  "date": "2026-01-10",
+  "tasks": [
+    {
+      "talker": "川群-2025",
+      "display_name": "川群-2025",
+      "date": "2026-01-10",
+      "status": "failed",
+      "result_path": null,
+      "error_message": "LLM 分析失败 (site=chatgpt)\nHTTP 状态码: 502\n错误信息: HTTPError 502: HTTP Error 502: Bad Gateway\n\n可能原因：\n  1. driver_server 未运行或已崩溃\n  2. driver_server 处理请求时出错\n  3. 网络连接问题\n解决方案：\n  1. 检查 driver_server 是否运行: curl http://127.0.0.1:27125/health\n  2. 重启 driver_server: python start_driver.py --brief ./brief.yaml\n  3. 查看 driver_server 日志: logs/driver_*.log",
+      "created_at": "2026-01-10T16:18:28.591348",
+      "completed_at": "2026-01-10T16:18:30.885157",
+      "message_count": null
+    }
+  ],
+  "status": "failed",
+  "created_at": "2026-01-10T16:18:28.591354",
+  "completed_at": "2026-01-10T16:18:30.887455",
+  "llm_site": "chatgpt",
+  "model_version": "5.2thinking",
+  "template_id": "system_chatgpt_chatlog",
+  "public": false
+}

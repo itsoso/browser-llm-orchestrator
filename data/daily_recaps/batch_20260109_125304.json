@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_125304",
+  "date": "2026-01-08",
+  "tasks": [
+    {
+      "talker": "川群-2025",
+      "display_name": "川群-2025",
+      "date": "2026-01-08",
+      "status": "failed",
+      "result_path": null,
+      "error_message": "name 'start_date' is not defined",
+      "created_at": "2026-01-09T12:53:04.562753",
+      "completed_at": "2026-01-09T12:57:27.978827",
+      "message_count": null
+    }
+  ],
+  "status": "failed",
+  "created_at": "2026-01-09T12:53:04.562764",
+  "completed_at": "2026-01-09T12:57:27.982767",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

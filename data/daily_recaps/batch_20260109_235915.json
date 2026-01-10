@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_235915",
+  "date": "2026-01-05",
+  "tasks": [
+    {
+      "talker": "只谈理论，不谈实践",
+      "display_name": "只谈理论，不谈实践",
+      "date": "2026-01-05",
+      "status": "completed",
+      "result_path": "/Users/liqiuhua/work/personal/obsidian/personal/10_Sources/WeChat/10-Summaries/只谈理论，不谈实践/2026/01/第2周/只谈理论，不谈实践 第2周-2026-01-05-Sum-5.2instant.md",
+      "error_message": null,
+      "created_at": "2026-01-09T23:59:15.843294",
+      "completed_at": "2026-01-10T00:04:27.461657",
+      "message_count": 34
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-09T23:59:15.843299",
+  "completed_at": "2026-01-10T00:04:27.462015",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

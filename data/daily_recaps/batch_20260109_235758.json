@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_235758",
+  "date": "2026-01-05",
+  "tasks": [
+    {
+      "talker": "桃园林读书会4.0",
+      "display_name": "桃园林读书会4.0",
+      "date": "2026-01-05",
+      "status": "completed",
+      "result_path": "/Users/liqiuhua/work/personal/obsidian/personal/10_Sources/WeChat/10-Summaries/桃园林读书会4.0/2026/01/第2周/桃园林读书会4.0 第2周-2026-01-05-Sum-5.2instant.md",
+      "error_message": null,
+      "created_at": "2026-01-09T23:57:58.142732",
+      "completed_at": "2026-01-10T00:02:07.644111",
+      "message_count": 326
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-09T23:57:58.142738",
+  "completed_at": "2026-01-10T00:02:07.644781",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

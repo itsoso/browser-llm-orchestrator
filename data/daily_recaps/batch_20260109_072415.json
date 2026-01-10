@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_072415",
+  "date": "2026-01-07",
+  "tasks": [
+    {
+      "talker": "川群-2025",
+      "display_name": "川群-2025",
+      "date": "2026-01-07",
+      "status": "pending",
+      "result_path": null,
+      "error_message": null,
+      "created_at": "2026-01-09T07:24:15.186083",
+      "completed_at": null,
+      "message_count": null
+    }
+  ],
+  "status": "pending",
+  "created_at": "2026-01-09T07:24:15.186090",
+  "completed_at": null,
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

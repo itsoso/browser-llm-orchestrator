@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_074618",
+  "date": "2026-01-08",
+  "tasks": [
+    {
+      "talker": "35059034502@chatroom",
+      "display_name": "35059034502@chatroom",
+      "date": "2026-01-08",
+      "status": "failed",
+      "result_path": null,
+      "error_message": "配置文件中未找到 obsidian.vault_path",
+      "created_at": "2026-01-09T07:46:18.785486",
+      "completed_at": "2026-01-09T07:46:20.370728",
+      "message_count": null
+    }
+  ],
+  "status": "failed",
+  "created_at": "2026-01-09T07:46:18.785517",
+  "completed_at": "2026-01-09T07:46:20.372928",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

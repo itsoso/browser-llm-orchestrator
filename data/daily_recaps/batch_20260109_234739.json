@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_234739",
+  "date": "2026-01-08",
+  "tasks": [
+    {
+      "talker": "话李话外 互助交流群",
+      "display_name": "话李话外 互助交流群",
+      "date": "2026-01-08",
+      "status": "completed",
+      "result_path": "/Users/liqiuhua/work/personal/obsidian/personal/10_Sources/WeChat/10-Summaries/话李话外 互助交流群/2026/01/第2周/话李话外 互助交流群 第2周-2026-01-08-Sum-5.2instant.md",
+      "error_message": null,
+      "created_at": "2026-01-09T23:47:39.989959",
+      "completed_at": "2026-01-09T23:51:25.465506",
+      "message_count": 52
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-09T23:47:39.989968",
+  "completed_at": "2026-01-09T23:51:25.465980",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

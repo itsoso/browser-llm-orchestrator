@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_144703",
+  "date": "2026-01-09",
+  "tasks": [
+    {
+      "talker": "图阳图Simple - Trial",
+      "display_name": "图阳图Simple - Trial",
+      "date": "2026-01-09",
+      "status": "completed",
+      "result_path": "/Users/liqiuhua/work/personal/obsidian/personal/10_Sources/WeChat/10-Summaries/图阳图Simple - Trial/2026/01/第2周/图阳图Simple - Trial 第2周-2026-01-09-Sum-5.2instant.md",
+      "error_message": null,
+      "created_at": "2026-01-09T14:47:03.598619",
+      "completed_at": "2026-01-09T14:57:18.299064",
+      "message_count": 237
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-09T14:47:03.598629",
+  "completed_at": "2026-01-09T14:57:18.299756",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

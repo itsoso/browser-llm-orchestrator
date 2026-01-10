@@ -510,7 +510,7 @@ async def run_automation(
     driver_url: Optional[str] = None,
     arbitrator_site: str = "gemini",
     model_version: str = "5.2pro",
-    task_timeout_s: int = 600,
+    task_timeout_s: int = 2400,  # 默认 2400 秒（40 分钟），适配 Pro 模式深度思考
     new_chat: bool = False,
 ):
     """
@@ -541,7 +541,8 @@ async def run_automation(
         print(f"[{beijing_now_iso()}] [automation] ⚠️  警告: 检测到已存在的 summary 文件: {summary_path}")
         print(f"[{beijing_now_iso()}] [automation] 如果确实需要重新分析，请先删除该文件")
         print(f"[{beijing_now_iso()}] [automation] 跳过本次执行 (request_id={request_id})")
-        return
+        # 返回 None 表示已跳过
+        return None
     
     # 步骤 1: 获取聊天记录
     client = ChatlogClient(chatlog_url)
@@ -557,7 +558,8 @@ async def run_automation(
         
         if not messages:
             print(f"[{beijing_now_iso()}] [automation] ✗ 未获取到任何消息，退出")
-            return
+            # 返回 None 表示没有消息
+            return None
         
         print(f"[{beijing_now_iso()}] [automation] ✓ 获取到 {len(messages)} 条消息")
         
@@ -742,6 +744,19 @@ async def run_automation(
         print(f"[{beijing_now_iso()}] [automation] Raw 文件: {raw_path}")
         print(f"[{beijing_now_iso()}] [automation] Summary 文件: {summary_path}")
         
+        # 返回结果（用于批量处理等场景）
+        return {
+            "success": True,
+            "request_id": request_id,
+            "talker": talker,
+            "date_range": f"{start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}",
+            "message_count": len(messages),
+            "raw_file": str(raw_path),
+            "summary_file": str(summary_path),
+            "llm_site": arbitrator_site,
+            "model_version": model_version,
+        }
+        
     finally:
         await client.close()
 
@@ -806,7 +821,7 @@ def main():
     arbitrator_site = args.arbitrator_site or config.get("llm", {}).get("arbitrator_site", "gemini")
     # 支持 --model-version 和 --model_version 两种格式
     model_version = args.model_version or getattr(args, "model_version", None) or config.get("llm", {}).get("model_version", "5.2pro")
-    task_timeout_s = args.task_timeout_s or config.get("llm", {}).get("task_timeout_s", 600)
+    task_timeout_s = args.task_timeout_s or config.get("llm", {}).get("task_timeout_s", 2400)  # 默认 2400 秒（40 分钟）
     log_file = args.log_file or config.get("logging", {}).get("log_file")
     
     # 设置日志文件（类似 chatlog_cli）

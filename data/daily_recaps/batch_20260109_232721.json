@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_232721",
+  "date": "2026-01-09",
+  "tasks": [
+    {
+      "talker": "医疗大讲钱",
+      "display_name": "医疗大讲钱",
+      "date": "2026-01-09",
+      "status": "completed",
+      "result_path": "/Users/liqiuhua/work/personal/obsidian/personal/10_Sources/WeChat/10-Summaries/医疗大讲钱/2026/01/第2周/医疗大讲钱 第2周-2026-01-09-Sum-5.2instant.md",
+      "error_message": null,
+      "created_at": "2026-01-09T23:27:21.568407",
+      "completed_at": "2026-01-09T23:30:09.170690",
+      "message_count": 49
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-09T23:27:21.568413",
+  "completed_at": "2026-01-09T23:30:09.171169",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

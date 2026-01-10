@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_234408",
+  "date": "2026-01-09",
+  "tasks": [
+    {
+      "talker": "图阳图Simple - Trial",
+      "display_name": "图阳图Simple - Trial",
+      "date": "2026-01-09",
+      "status": "failed",
+      "result_path": null,
+      "error_message": "'NoneType' object is not subscriptable",
+      "created_at": "2026-01-09T23:44:08.627096",
+      "completed_at": "2026-01-09T23:44:10.261925",
+      "message_count": null
+    }
+  ],
+  "status": "failed",
+  "created_at": "2026-01-09T23:44:08.627103",
+  "completed_at": "2026-01-09T23:44:10.262387",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

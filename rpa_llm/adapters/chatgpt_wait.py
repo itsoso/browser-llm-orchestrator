@@ -247,22 +247,29 @@ class ChatGPTWaiter:
                             n_assist1 = n_assist0 + 1  # 合成值，继续等待
                         else:
                             await self.save_artifacts("no_assistant_reply")
-                            # 优化：减少 manual checkpoint 的等待时间，从 30 秒减少到 15 秒
-                            # 这样可以更快地检测到新消息，而不是等待 30 秒
+                            # 优化：根据剩余时间动态调整 manual checkpoint 等待时间
+                            # 对于 Pro 模式（长超时），给更多等待时间
                             elapsed = time.time() - ask_start_time
+                            remaining_time = timeout_s - elapsed
+                            # 如果剩余时间很长（> 600秒 = 10分钟），说明是 Pro 模式，给 2400 秒等待（40分钟）
+                            # 否则给 15 秒
+                            checkpoint_wait = 2400 if remaining_time > 600 else 15
                             await self.manual_checkpoint(
                                 "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
                                 ready_check=self._ready_check_textbox,
-                                max_wait_s=min(15, timeout_s - elapsed - 5),  # 从 30 秒减少到 15 秒（P0优化）
+                                max_wait_s=min(checkpoint_wait, remaining_time - 5),
                             )
                     except Exception:
                         # thinking 检测失败，触发 manual checkpoint
                         await self.save_artifacts("no_assistant_reply")
                         elapsed = time.time() - ask_start_time
+                        remaining_time = timeout_s - elapsed
+                        # Pro 模式（剩余时间 > 600秒）给 2400 秒等待，否则给 15 秒
+                        checkpoint_wait = 2400 if remaining_time > 600 else 15
                         await self.manual_checkpoint(
                             "发送后未等到回复（可能网络/风控/页面提示）。请检查页面是否需要操作。",
                             ready_check=self._ready_check_textbox,
-                            max_wait_s=min(15, timeout_s - elapsed - 5),
+                            max_wait_s=min(checkpoint_wait, remaining_time - 5),
                         )
                     # manual_checkpoint 后再次检查
                     try:
@@ -476,9 +483,8 @@ class ChatGPTWaiter:
             
             if thinking:
                 # 思考状态下，即使内容没有变化，也要继续等待
-                # 重置 last_change，避免过早认为稳定
-                last_change = time.time()
-                # 获取当前内容长度用于日志
+                # 但是，如果内容已经稳定（长时间没有变化），即使检测到 thinking，也应该认为已经完成
+                # 获取当前内容长度用于日志和判断
                 try:
                     n_assist_current = await self._assistant_count()
                     if n_assist_current > n_assist0:
@@ -491,21 +497,52 @@ class ChatGPTWaiter:
                             const sel = args.sel;
                             const idx = args.idx;
                             const els = document.querySelectorAll(sel);
-                            if (idx < 0 || idx >= els.length) return {len: 0};
+                            if (idx < 0 || idx >= els.length) return {len: 0, hash: ''};
                             const el = els[idx];
                             const text = (el.innerText || el.textContent || '').trim();
-                            return {len: text.length};
+                            // 计算简单哈希（前1000字符的哈希）
+                            const hashText = text.substring(0, 1000);
+                            let hash = 0;
+                            for (let i = 0; i < hashText.length; i++) {
+                                hash = ((hash << 5) - hash) + hashText.charCodeAt(i);
+                                hash = hash & hash;
+                            }
+                            return {len: text.length, hash: hash.toString()};
                         }""",
                         {"sel": combined_sel, "idx": target_index}
                     )
                     current_len = result.get("len", 0) if isinstance(result, dict) else 0
+                    current_hash = result.get("hash", "") if isinstance(result, dict) else ""
                 except Exception:
                     current_len = 0
+                    current_hash = ""
+                
+                # 关键修复：如果内容已经稳定（超过 60 秒没有变化），即使检测到 thinking，也认为已经完成
+                # 这可以避免 thinking 检测误判导致的长时间等待
+                time_since_change = time.time() - last_change
+                if current_len > 0 and current_hash == last_text_hash and time_since_change >= 60.0:
+                    self._log(f"ask: content stable for {time_since_change:.1f}s despite thinking detection, forcing completion (len={current_len})")
+                    # 强制认为已经完成，跳出 thinking 循环
+                    thinking = False
+                    # 继续执行后续的稳定化逻辑
+                else:
+                    # 如果内容还在变化或时间不够，重置 last_change，继续等待
+                    if current_hash != last_text_hash:
+                        last_text_hash = current_hash
+                        last_text_len = current_len
+                        last_change = time.time()
+                    else:
+                        # 内容没有变化，但不重置 last_change（用于判断是否稳定）
+                        pass
                 
                 # 控制日志频率：每 3 秒打印一次，避免日志过于频繁
                 if time.time() - thinking_log_hb >= 3.0:
-                    self._log(f"ask: ChatGPT Pro 还在思考中，继续等待（len={current_len}, remaining={remaining:.1f}s）")
+                    self._log(f"ask: ChatGPT Pro 还在思考中，继续等待（len={current_len}, remaining={remaining:.1f}s, stable={time_since_change:.1f}s）")
                     thinking_log_hb = time.time()
+                
+                # 如果已经强制完成，跳出循环
+                if not thinking:
+                    break
                 
                 # 如果内容长度为0或很短，可能是思考占位符，等待更长时间
                 if current_len == 0 or current_len < 100:
@@ -582,13 +619,26 @@ class ChatGPTWaiter:
                     try:
                         thinking_check = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
                         if thinking_check:
-                            # 控制日志频率：每 3 秒打印一次
-                            if time.time() - thinking_log_hb >= 3.0:
-                                self._log(f"ask: ChatGPT Pro 还在思考中（内容检查后），继续等待（len={current_len}, remaining={remaining:.1f}s）")
-                                thinking_log_hb = time.time()
-                            last_change = time.time()
-                            await asyncio.sleep(0.3)
-                            continue
+                            # 关键修复：如果内容已经稳定（超过 60 秒没有变化），即使检测到 thinking，也认为已经完成
+                            time_since_change = time.time() - last_change
+                            if current_len > 0 and current_hash == last_text_hash and time_since_change >= 60.0:
+                                self._log(f"ask: content stable for {time_since_change:.1f}s despite thinking detection (content check), forcing completion (len={current_len})")
+                                # 强制认为已经完成，不重置 last_change
+                                thinking_check = False
+                            else:
+                                # 如果内容还在变化或时间不够，重置 last_change，继续等待
+                                if current_hash != last_text_hash:
+                                    last_text_hash = current_hash
+                                    last_text_len = current_len
+                                    last_change = time.time()
+                            
+                            if thinking_check:
+                                # 控制日志频率：每 3 秒打印一次
+                                if time.time() - thinking_log_hb >= 3.0:
+                                    self._log(f"ask: ChatGPT Pro 还在思考中（内容检查后），继续等待（len={current_len}, remaining={remaining:.1f}s, stable={time_since_change:.1f}s）")
+                                    thinking_log_hb = time.time()
+                                await asyncio.sleep(0.3)
+                                continue
                     except Exception:
                         pass  # thinking 检测失败不影响继续
                     
@@ -609,13 +659,19 @@ class ChatGPTWaiter:
                         try:
                             thinking_empty = await asyncio.wait_for(self._is_thinking(), timeout=0.3)
                             if thinking_empty:
-                                # 控制日志频率：每 3 秒打印一次
-                                if time.time() - thinking_log_hb >= 3.0:
-                                    self._log(f"ask: content empty but still thinking, continuing to wait (remaining={remaining:.1f}s)")
-                                    thinking_log_hb = time.time()
-                                last_change = time.time()
-                                await asyncio.sleep(0.5)  # 思考模式下等待更长时间
-                                continue
+                                # 关键修复：如果内容为空但已经等待超过 120 秒，强制认为已经完成（可能是误判）
+                                time_since_change = time.time() - last_change
+                                if time_since_change >= 120.0:
+                                    self._log(f"ask: content empty but waited {time_since_change:.1f}s, forcing completion despite thinking detection")
+                                    thinking_empty = False
+                                
+                                if thinking_empty:
+                                    # 控制日志频率：每 3 秒打印一次
+                                    if time.time() - thinking_log_hb >= 3.0:
+                                        self._log(f"ask: content empty but still thinking, continuing to wait (remaining={remaining:.1f}s, waited={time_since_change:.1f}s)")
+                                        thinking_log_hb = time.time()
+                                    await asyncio.sleep(0.5)  # 思考模式下等待更长时间
+                                    continue
                         except Exception:
                             pass  # thinking 检测失败不影响继续
                         
@@ -674,6 +730,12 @@ class ChatGPTWaiter:
                     
                     # 快速路径：如果 generating=False 且文本长度在 0.5 秒内没有变化，直接认为稳定
                     # 关键修复：必须确保不在思考状态，才能认为稳定
+                    # 但是，如果内容已经稳定超过 60 秒，即使检测到 thinking，也强制完成
+                    force_complete = (current_len > 0 and current_hash == last_text_hash and time_since_change >= 60.0)
+                    if force_complete:
+                        self._log(f"ask: content stable for {time_since_change:.1f}s, forcing completion despite thinking={thinking} (len={current_len})")
+                        thinking = False  # 强制认为不在思考状态
+                    
                     if current_len > 0 and (not generating) and (not thinking) and time_since_change >= 0.5 and time_since_change >= stable_seconds:
                         # P1优化：稳定后，只拉取一次完整文本
                         if not final_text_fetched:
@@ -721,7 +783,14 @@ class ChatGPTWaiter:
                     
                     # 原有逻辑：稳定时间达到且不在生成
                     # 关键修复：必须确保不在思考状态，才能认为稳定
-                    if current_len > 0 and (time.time() - last_change) >= stable_seconds and (not generating) and (not thinking):
+                    # 但是，如果内容已经稳定超过 60 秒，即使检测到 thinking，也强制完成
+                    time_since_change_normal = time.time() - last_change
+                    force_complete_normal = (current_len > 0 and current_hash == last_text_hash and time_since_change_normal >= 60.0)
+                    if force_complete_normal:
+                        self._log(f"ask: content stable for {time_since_change_normal:.1f}s (normal path), forcing completion despite thinking={thinking} (len={current_len})")
+                        thinking = False  # 强制认为不在思考状态
+                    
+                    if current_len > 0 and time_since_change_normal >= stable_seconds and (not generating) and (not thinking):
                         # P1优化：稳定后，只拉取一次完整文本
                         if not final_text_fetched:
                             try:

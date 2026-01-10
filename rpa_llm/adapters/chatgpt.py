@@ -1152,6 +1152,7 @@ class ChatGPTAdapter(SiteAdapter):
         - 页面中包含 "思考中"、"thinking"、"Pro 思考" 等文本
         - 可能显示 "立即回答" 按钮（表示可以中断思考）
         - 思考状态通常在 assistant 消息区域显示
+        - Pro 模式下可能显示进度条、思考时间等
         
         Returns:
             True 如果检测到思考状态，False 否则
@@ -1160,34 +1161,73 @@ class ChatGPTAdapter(SiteAdapter):
             # 使用 JS evaluate 直接查询，避免 Playwright 的额外开销
             is_thinking = await self.page.evaluate(
                 """() => {
-                    // 方法1: 查找包含 "思考中" 或 "thinking" 的文本
+                    // 方法1: 查找包含思考相关关键词的文本（更宽泛的检测）
                     const bodyText = document.body.innerText || document.body.textContent || '';
-                    const thinkingKeywords = ['思考中', 'thinking', 'Pro 思考', 'Final output', '立即回答'];
+                    const bodyTextLower = bodyText.toLowerCase();
+                    
+                    // 中英文思考关键词（Pro 模式特有的）
+                    const thinkingKeywords = [
+                        '思考中', '正在思考', '深度思考', 'Pro 思考', '思考用时',
+                        'thinking', 'Thinking', 'reasoning', 'Reasoning',
+                        'Final output', 'Finalizing', 
+                        '立即回答', 'Answer immediately', 'Answer now',
+                        '正在分析', '分析中', 'Analyzing',
+                        '推理中', '正在推理'
+                    ];
+                    
+                    // 检查 bodyText 中是否包含任何思考关键词
                     for (const keyword of thinkingKeywords) {
-                        if (bodyText.includes(keyword)) {
-                            // 进一步验证：确保是在 assistant 消息区域
-                            // 查找最近的 assistant 消息元素
-                            const assistantMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-                            if (assistantMsgs.length > 0) {
-                                const lastMsg = assistantMsgs[assistantMsgs.length - 1];
-                                const msgText = lastMsg.innerText || lastMsg.textContent || '';
-                                // 如果最后一条消息包含思考关键词，或者消息很短（可能是思考占位符）
-                                if (msgText.includes(keyword) || (msgText.length < 50 && keyword === '思考中')) {
-                                    return true;
-                                }
+                        if (bodyText.includes(keyword) || bodyTextLower.includes(keyword.toLowerCase())) {
+                            return true;  // 直接返回 true，不再额外验证
+                        }
+                    }
+                    
+                    // 方法2: 查找 "立即回答" 或相关按钮（思考模式下会出现）
+                    const allElements = document.querySelectorAll('button, a, span, div');
+                    for (let el of allElements) {
+                        const elText = (el.innerText || el.textContent || '').trim();
+                        // 检查按钮文本
+                        if (elText === '立即回答' || elText === 'Answer immediately' || 
+                            elText === 'Answer now' || elText === 'Skip thinking' ||
+                            elText.includes('thinking for') || elText.includes('秒')) {
+                            // 如果元素可见，说明还在思考中
+                            if (el.offsetParent !== null && el.offsetWidth > 0) {
+                                return true;
                             }
                         }
                     }
                     
-                    // 方法2: 查找 "立即回答" 按钮（思考模式下会出现）
-                    const answerNowButtons = document.querySelectorAll('button, a, span');
-                    for (let btn of answerNowButtons) {
-                        const btnText = (btn.innerText || btn.textContent || '').trim();
-                        if (btnText === '立即回答' || btnText === 'Answer immediately') {
-                            // 如果按钮可见，说明还在思考中
-                            if (btn.offsetParent !== null) {
+                    // 方法3: 检查是否有 "stop" 或 "停止" 按钮可见（表示正在生成/思考）
+                    const stopButtons = document.querySelectorAll('[aria-label*="stop"], [aria-label*="Stop"], [data-testid*="stop"]');
+                    if (stopButtons.length > 0) {
+                        for (let btn of stopButtons) {
+                            if (btn.offsetParent !== null && btn.offsetWidth > 0) {
                                 return true;
                             }
+                        }
+                    }
+                    
+                    // 方法4: 检查页面是否有动态加载指示器（思考时可能有动画）
+                    const spinners = document.querySelectorAll('[class*="spinner"], [class*="loading"], [class*="animate"]');
+                    // 如果有较多的动态元素，可能正在思考
+                    let visibleSpinners = 0;
+                    for (let spinner of spinners) {
+                        if (spinner.offsetParent !== null) {
+                            visibleSpinners++;
+                        }
+                    }
+                    if (visibleSpinners >= 2) {
+                        return true;
+                    }
+                    
+                    // 方法5: 检查最后一条 assistant 消息是否很短或为空（正在生成中）
+                    const assistantMsgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+                    if (assistantMsgs.length > 0) {
+                        const lastMsg = assistantMsgs[assistantMsgs.length - 1];
+                        const msgText = (lastMsg.innerText || lastMsg.textContent || '').trim();
+                        // 如果消息很短（<100字符）且包含省略号或正在加载的提示
+                        if (msgText.length < 100 && (msgText.includes('...') || msgText.includes('…') || msgText === '')) {
+                            return true;
                         }
                     }
                     

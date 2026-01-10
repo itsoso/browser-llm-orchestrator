@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Web Admin 自动化测试</title>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body {
+            font-family: 'Monaco', 'Courier New', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .log {
+            background: #2d2d2d;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border-left: 3px solid #007acc;
+        }
+        .success { border-left-color: #4ec9b0; color: #4ec9b0; }
+        .error { border-left-color: #f48771; color: #f48771; }
+        .info { border-left-color: #ffd700; color: #ffd700; }
+        button {
+            background: #007acc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 10px 10px 10px 0;
+            font-size: 14px;
+        }
+        button:hover { background: #005a9e; }
+        button:disabled { background: #666; cursor: not-allowed; }
+        #logs { max-height: 600px; overflow-y: auto; }
+        h1 { color: #4ec9b0; }
+        h2 { color: #569cd6; margin-top: 30px; }
+        pre { 
+            background: #252526; 
+            padding: 10px; 
+            border-radius: 3px; 
+            overflow-x: auto;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔧 Web Admin 自动化测试工具</h1>
+    <p>这个工具会自动执行完整的测试流程并显示详细日志</p>
+    
+    <div>
+        <button onclick="testFullFlow()">🚀 执行完整流程测试</button>
+        <button onclick="testGetTalkers()">📋 测试获取群聊列表</button>
+        <button onclick="testCreateBatch()">➕ 测试创建批次</button>
+        <button onclick="clearLogs()">🗑️ 清空日志</button>
+    </div>
+    
+    <h2>📊 测试日志：</h2>
+    <div id="logs"></div>
+    
+    <script>
+        const API_BASE = 'http://127.0.0.1:5050';
+        
+        function log(message, type = 'info') {
+            const logsDiv = document.getElementById('logs');
+            const logDiv = document.createElement('div');
+            logDiv.className = `log ${type}`;
+            
+            const time = new Date().toLocaleTimeString('zh-CN');
+            logDiv.innerHTML = `<strong>[${time}]</strong> ${message}`;
+            
+            logsDiv.appendChild(logDiv);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+            
+            console.log(`[${type.toUpperCase()}]`, message);
+        }
+        
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+            log('日志已清空', 'info');
+        }
+        
+        async function testGetTalkers() {
+            log('开始测试获取群聊列表...', 'info');
+            
+            try {
+                const response = await axios.get(`${API_BASE}/api/recap/talkers`, {
+                    params: { days: 7 }
+                });
+                
+                if (response.data.ok) {
+                    log(`✅ 成功获取 ${response.data.talkers.length} 个活跃群聊`, 'success');
+                    
+                    response.data.talkers.slice(0, 5).forEach((t, i) => {
+                        log(`  ${i+1}. ${t.display_name} (${t.message_count} 条消息)`, 'info');
+                    });
+                    
+                    if (response.data.talkers.length > 5) {
+                        log(`  ... 还有 ${response.data.talkers.length - 5} 个群聊`, 'info');
+                    }
+                    
+                    return response.data.talkers;
+                } else {
+                    log(`❌ 获取失败: ${response.data.error}`, 'error');
+                    return null;
+                }
+            } catch (error) {
+                log(`❌ 请求失败: ${error.message}`, 'error');
+                if (error.response) {
+                    log(`   响应状态: ${error.response.status}`, 'error');
+                    log(`   响应数据: ${JSON.stringify(error.response.data)}`, 'error');
+                }
+                return null;
+            }
+        }
+        
+        async function testCreateBatch() {
+            log('开始测试创建批次...', 'info');
+            
+            // 先获取群聊列表
+            const talkers = await testGetTalkers();
+            if (!talkers || talkers.length === 0) {
+                log('❌ 无法创建批次：没有可用的群聊', 'error');
+                return;
+            }
+            
+            // 选择消息数最少的群聊
+            const selectedTalker = talkers.reduce((min, t) => 
+                t.message_count < min.message_count ? t : min
+            );
+            
+            log(`📝 选择群聊: ${selectedTalker.display_name} (${selectedTalker.message_count} 条消息)`, 'info');
+            
+            const today = new Date().toISOString().split('T')[0];
+            
+            try {
+                log('📤 发送创建批次请求...', 'info');
+                const createResponse = await axios.post(`${API_BASE}/api/recap/create`, {
+                    talkers: [selectedTalker.display_name],
+                    date: today,
+                    llm_site: 'chatgpt',
+                    model_version: '5.2instant',
+                    public: false
+                });
+                
+                if (createResponse.data.ok) {
+                    const batchId = createResponse.data.batch_id;
+                    log(`✅ 批次创建成功! ID: ${batchId}`, 'success');
+                    
+                    // 查看批次详情
+                    await viewBatchDetail(batchId);
+                    
+                    // 询问是否启动处理
+                    if (confirm('批次已创建，是否启动处理？\n\n注意：这会真正调用 LLM，可能需要几分钟时间。')) {
+                        await startProcessing(batchId);
+                    }
+                } else {
+                    log(`❌ 创建失败: ${createResponse.data.error}`, 'error');
+                }
+            } catch (error) {
+                log(`❌ 创建批次失败: ${error.message}`, 'error');
+                if (error.response) {
+                    log(`   详情: ${JSON.stringify(error.response.data, null, 2)}`, 'error');
+                }
+            }
+        }
+        
+        async function viewBatchDetail(batchId) {
+            try {
+                log(`🔍 查看批次详情: ${batchId}`, 'info');
+                const response = await axios.get(`${API_BASE}/api/recap/batch/${batchId}`);
+                
+                if (response.data.ok) {
+                    const batch = response.data.batch;
+                    log(`📊 批次状态: ${batch.status}`, 'info');
+                    log(`📅 日期: ${batch.date}`, 'info');
+                    log(`🤖 LLM: ${batch.llm_site} (${batch.model_version})`, 'info');
+                    log(`📋 任务数: ${batch.tasks.length}`, 'info');
+                    
+                    batch.tasks.forEach((task, i) => {
+                        log(`  任务 ${i+1}: ${task.display_name} - ${task.status}`, 'info');
+                    });
+                }
+            } catch (error) {
+                log(`❌ 查看详情失败: ${error.message}`, 'error');
+            }
+        }
+        
+        async function startProcessing(batchId) {
+            try {
+                log(`🚀 启动批次处理: ${batchId}`, 'info');
+                log(`⏰ 这可能需要 2-5 分钟，请耐心等待...`, 'info');
+                
+                const response = await axios.post(`${API_BASE}/api/recap/process/${batchId}`, {
+                    timeout: 1200
+                });
+                
+                if (response.data.ok) {
+                    log(`✅ 处理已启动`, 'success');
+                    
+                    // 开始轮询进度
+                    pollProgress(batchId);
+                } else {
+                    log(`❌ 启动失败: ${response.data.error}`, 'error');
+                }
+            } catch (error) {
+                log(`❌ 启动处理失败: ${error.message}`, 'error');
+            }
+        }
+        
+        async function pollProgress(batchId) {
+            let pollCount = 0;
+            const maxPolls = 60; // 最多轮询 5 分钟（每5秒一次）
+            
+            const poll = async () => {
+                try {
+                    const response = await axios.get(`${API_BASE}/api/recap/batch/${batchId}`);
+                    
+                    if (response.data.ok) {
+                        const batch = response.data.batch;
+                        pollCount++;
+                        
+                        log(`📊 [${pollCount}] 批次状态: ${batch.status}`, 'info');
+                        
+                        batch.tasks.forEach((task, i) => {
+                            const icon = task.status === 'completed' ? '✅' : 
+                                       task.status === 'processing' ? '⏳' : 
+                                       task.status === 'failed' ? '❌' : '⏸️';
+                            log(`  ${icon} ${task.display_name}: ${task.status}`, 'info');
+                        });
+                        
+                        if (batch.status === 'completed') {
+                            log(`🎉 批次处理完成！`, 'success');
+                            
+                            // 显示结果
+                            batch.tasks.forEach(task => {
+                                if (task.status === 'completed' && task.result_path) {
+                                    log(`📄 结果文件: ${task.result_path}`, 'success');
+                                }
+                            });
+                            return;
+                        } else if (batch.status === 'failed') {
+                            log(`❌ 批次处理失败`, 'error');
+                            return;
+                        } else if (pollCount < maxPolls) {
+                            // 5秒后继续轮询
+                            setTimeout(poll, 5000);
+                        } else {
+                            log(`⏰ 轮询超时，请手动刷新查看结果`, 'info');
+                        }
+                    }
+                } catch (error) {
+                    log(`❌ 轮询失败: ${error.message}`, 'error');
+                }
+            };
+            
+            poll();
+        }
+        
+        async function testFullFlow() {
+            log('════════════════════════════════════════', 'info');
+            log('🚀 开始执行完整流程测试', 'info');
+            log('════════════════════════════════════════', 'info');
+            
+            // 1. 测试系统状态
+            log('\n1️⃣  检查系统状态...', 'info');
+            try {
+                const statusResp = await axios.get(`${API_BASE}/api/status`);
+                if (statusResp.data.ok) {
+                    log(`✅ Web Admin: 运行中`, 'success');
+                    log(`✅ Driver Server: ${statusResp.data.driver_running ? '运行中' : '未运行'}`, 
+                        statusResp.data.driver_running ? 'success' : 'error');
+                }
+            } catch (error) {
+                log(`❌ 系统状态检查失败: ${error.message}`, 'error');
+                return;
+            }
+            
+            // 2. 获取群聊列表
+            log('\n2️⃣  获取活跃群聊列表...', 'info');
+            const talkers = await testGetTalkers();
+            if (!talkers || talkers.length === 0) {
+                log('❌ 测试终止：无可用群聊', 'error');
+                return;
+            }
+            
+            // 3. 创建测试批次
+            log('\n3️⃣  创建测试批次...', 'info');
+            await testCreateBatch();
+            
+            log('\n════════════════════════════════════════', 'info');
+            log('✅ 测试流程完成', 'success');
+            log('════════════════════════════════════════', 'info');
+        }
+        
+        // 页面加载时的欢迎信息
+        window.onload = function() {
+            log('🎉 Web Admin 自动化测试工具已就绪', 'success');
+            log('点击按钮开始测试，所有操作都会显示详细日志', 'info');
+        };
+    </script>
+</body>
+</html>

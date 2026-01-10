@@ -1,0 +1,57 @@
+<body class="bg-gray-50">
+    <!-- 左侧菜单 -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h1 class="text-xl font-bold">🤖 LLM Orchestrator</h1>
+            <p class="text-xs text-blue-200 mt-1">多 LLM 决策系统</p>
+        </div>
+        
+        <nav class="mt-4">
+            <div class="menu-item active" onclick="showTab('warmup')">
+                <span class="menu-item-icon">🔥</span>
+                <span>站点预热</span>
+            </div>
+            <div class="menu-item" onclick="showTab('chatlog')">
+                <span class="menu-item-icon">💬</span>
+                <span>Chatlog 自动化</span>
+            </div>
+            <div class="menu-item" onclick="showTab('recap')">
+                <span class="menu-item-icon">📊</span>
+                <span>每日复盘</span>
+            </div>
+            <div class="menu-item" onclick="showTab('logs')">
+                <span class="menu-item-icon">📝</span>
+                <span>日志查看</span>
+            </div>
+            <div class="menu-item" onclick="showTab('config')">
+                <span class="menu-item-icon">⚙️</span>
+                <span>配置管理</span>
+            </div>
+            <div class="menu-item" onclick="showTab('templates')">
+                <span class="menu-item-icon">🎨</span>
+                <span>模板管理</span>
+            </div>
+        </nav>
+    </aside>
+
+    <!-- 主内容区域 -->
+    <main class="main-content">
+        <!-- 顶部状态栏 -->
+        <div class="status-bar">
+            <div class="flex items-center space-x-6">
+                <div class="flex items-center">
+                    <span id="driver-status-dot" class="status-dot status-stopped"></span>
+                    <span class="text-sm font-medium">Driver Server</span>
+                    <span id="driver-status-text" class="ml-2 text-sm text-gray-600">已停止</span>
+                </div>
+                <div class="text-sm text-gray-600">
+                    <span id="driver-config-sites">站点: -</span>
+                </div>
+            </div>
+            <button onclick="refreshStatus()" class="text-sm text-blue-600 hover:text-blue-700">
+                🔄 刷新状态
+            </button>
+        </div>
+
+        <!-- 内容区域 -->
+        <div class="content-wrapper">

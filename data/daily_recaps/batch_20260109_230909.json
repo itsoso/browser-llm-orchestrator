@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_230909",
+  "date": "2026-01-09",
+  "tasks": [
+    {
+      "talker": "梦回长安F155群",
+      "display_name": "梦回长安F155群",
+      "date": "2026-01-09",
+      "status": "completed",
+      "result_path": null,
+      "error_message": "该日期无消息记录",
+      "created_at": "2026-01-09T23:09:09.207608",
+      "completed_at": "2026-01-09T23:09:12.586857",
+      "message_count": 0
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-09T23:09:09.207616",
+  "completed_at": "2026-01-09T23:09:12.587288",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

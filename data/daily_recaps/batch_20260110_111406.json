@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260110_111406",
+  "date": "2026-01-05",
+  "tasks": [
+    {
+      "talker": "川群-2025",
+      "display_name": "川群-2025",
+      "date": "2026-01-05",
+      "status": "completed",
+      "result_path": "/Users/liqiuhua/work/personal/obsidian/personal/10_Sources/WeChat/10-Summaries/川群-2025/2026/01/第2周/川群-2025 第2周-2026-01-05-Sum-5.2thinking.md",
+      "error_message": null,
+      "created_at": "2026-01-10T11:14:06.719222",
+      "completed_at": "2026-01-10T11:16:01.415522",
+      "message_count": 8
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-10T11:14:06.719227",
+  "completed_at": "2026-01-10T11:16:01.416378",
+  "llm_site": "chatgpt",
+  "model_version": "5.2thinking",
+  "public": false
+}

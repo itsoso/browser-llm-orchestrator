@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_073846",
+  "date": "2026-01-08",
+  "tasks": [
+    {
+      "talker": "26532511649@chatroom",
+      "display_name": "26532511649@chatroom",
+      "date": "2026-01-08",
+      "status": "failed",
+      "result_path": null,
+      "error_message": "run_automation() got an unexpected keyword argument 'start_date'",
+      "created_at": "2026-01-09T07:38:46.776497",
+      "completed_at": "2026-01-09T07:38:49.930216",
+      "message_count": null
+    }
+  ],
+  "status": "failed",
+  "created_at": "2026-01-09T07:38:46.776509",
+  "completed_at": "2026-01-09T07:38:49.930742",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

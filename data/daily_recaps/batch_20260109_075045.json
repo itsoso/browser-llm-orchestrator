@@ -1,0 +1,23 @@
+{
+  "batch_id": "20260109_075045",
+  "date": "2026-01-08",
+  "tasks": [
+    {
+      "talker": "35059034502@chatroom",
+      "display_name": "35059034502@chatroom",
+      "date": "2026-01-08",
+      "status": "completed",
+      "result_path": null,
+      "error_message": "该日期无消息记录",
+      "created_at": "2026-01-09T07:50:45.652793",
+      "completed_at": "2026-01-09T07:50:49.749416",
+      "message_count": 0
+    }
+  ],
+  "status": "completed",
+  "created_at": "2026-01-09T07:50:45.652802",
+  "completed_at": "2026-01-09T07:50:49.749951",
+  "llm_site": "chatgpt",
+  "model_version": "5.2instant",
+  "public": false
+}

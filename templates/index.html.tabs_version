@@ -159,70 +159,81 @@
     </style>
 </head>
 <body class="bg-gray-50">
-    <!-- 左侧菜单 -->
-    <aside class="sidebar">
-        <div class="sidebar-header">
-            <h1 class="text-xl font-bold">🤖 LLM Orchestrator</h1>
-            <p class="text-xs text-blue-200 mt-1">多 LLM 决策系统</p>
-        </div>
-        
-        <nav class="mt-4">
-            <div class="menu-item active" onclick="showTab('warmup')">
-                <span class="menu-item-icon">🔥</span>
-                <span>站点预热</span>
-            </div>
-            <div class="menu-item" onclick="showTab('chatlog')">
-                <span class="menu-item-icon">💬</span>
-                <span>Chatlog 自动化</span>
-            </div>
-            <div class="menu-item" onclick="showTab('recap')">
-                <span class="menu-item-icon">📊</span>
-                <span>每日复盘</span>
-            </div>
-            <div class="menu-item" onclick="showTab('logs')">
-                <span class="menu-item-icon">📝</span>
-                <span>日志查看</span>
-            </div>
-            <div class="menu-item" onclick="showTab('config')">
-                <span class="menu-item-icon">⚙️</span>
-                <span>配置管理</span>
-            </div>
-            <div class="menu-item" onclick="showTab('templates')">
-                <span class="menu-item-icon">🎨</span>
-                <span>模板管理</span>
-            </div>
-        </nav>
-    </aside>
-
-    <!-- 主内容区域 -->
-    <div class="main-content">
-        <!-- 顶部状态栏 -->
-        <div class="status-bar">
-            <div class="flex items-center space-x-6">
-                <div class="flex items-center">
-                    <span id="driver-status-dot" class="status-dot status-stopped"></span>
-                    <span class="text-sm font-medium">Driver Server</span>
-                    <span id="driver-status-text" class="ml-2 text-sm text-gray-600">检查中...</span>
-                </div>
-                <div class="text-sm text-gray-600">
-                    <span id="driver-config-sites">站点: -</span>
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm">
+            <div class="max-w-7xl mx-auto px-6 py-4">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h1 class="text-2xl font-bold text-gray-900">🤖 Browser LLM Orchestrator</h1>
+                        <p class="text-sm text-gray-600 mt-1">多 LLM 决策系统 Web 管理界面</p>
+                    </div>
+                    <div>
+                        <button onclick="refreshStatus()" class="btn btn-primary">
+                            🔄 刷新状态
+                        </button>
+                    </div>
                 </div>
             </div>
-            <div class="flex items-center space-x-3">
-                <button onclick="startDriver()" id="start-driver-btn" class="text-sm px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700">
-                    ▶️ 启动
-                </button>
-                <button onclick="stopDriver()" id="stop-driver-btn" class="text-sm px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700">
-                    ⏹ 停止
-                </button>
-                <button onclick="refreshStatus()" class="text-sm px-3 py-1 text-blue-600 hover:text-blue-700">
-                    🔄 刷新
-                </button>
-            </div>
-        </div>
+        </header>
 
-        <!-- 原有内容区域 -->
-        <div class="bg-white rounded-lg shadow p-6">
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-6 py-8">
+            <!-- Status Card -->
+            <div class="card">
+                <h2 class="text-xl font-semibold mb-4">📊 系统状态</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <div class="flex items-center mb-2">
+                            <span id="driver-status-dot" class="status-dot status-stopped"></span>
+                            <span class="font-medium">Driver Server</span>
+                        </div>
+                        <div class="text-sm text-gray-600" id="driver-info">检查中...</div>
+                        <div class="mt-3 flex gap-2">
+                            <button onclick="startDriver()" id="btn-start-driver" class="btn btn-success text-sm">
+                                ▶️ 启动
+                            </button>
+                            <button onclick="stopDriver()" id="btn-stop-driver" class="btn btn-danger text-sm">
+                                ⏹️ 停止
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="font-medium mb-2">⚙️ 配置信息</div>
+                        <div class="text-sm text-gray-600">
+                            <div>站点: <span id="config-sites">-</span></div>
+                            <div>输出目录: <span id="config-output">-</span></div>
+                            <div>最后更新: <span id="status-timestamp">-</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="card">
+                <div class="border-b border-gray-200 mb-6">
+                    <div class="flex">
+                        <button class="tab-button active" onclick="showTab('warmup')">
+                            🔥 站点预热
+                        </button>
+                        <button class="tab-button" onclick="showTab('chatlog')">
+                            💬 Chatlog 自动化
+                        </button>
+                        <button class="tab-button" onclick="showTab('recap')">
+                            📊 每日复盘
+                        </button>
+                        <button class="tab-button" onclick="showTab('logs')">
+                            📝 日志查看
+                        </button>
+                        <button class="tab-button" onclick="showTab('config')">
+                            ⚙️ 配置管理
+                        </button>
+                        <button class="tab-button" onclick="showTab('templates')">
+                            🎨 模板管理
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Warmup Tab -->
                 <div id="tab-warmup" class="tab-content">
                     <h3 class="text-lg font-semibold mb-4">站点预热（首次登录）</h3>
@@ -331,11 +342,11 @@
                                 <div class="grid grid-cols-2 gap-2">
                                     <div>
                                         <label class="block text-xs text-gray-500 mb-1">开始日期</label>
-                                        <input type="date" id="recap-date-start" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
+                                        <input type="date" id="recap-date-start" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
                                     </div>
                                     <div>
                                         <label class="block text-xs text-gray-500 mb-1">结束日期</label>
-                                        <input type="date" id="recap-date-end" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
+                                        <input type="date" id="recap-date-end" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
                                     </div>
                                 </div>
                                 <p class="text-xs text-gray-500 mt-1">💡 提示：选择相同日期可分析单天</p>
@@ -345,26 +356,14 @@
                                 <label class="block text-sm font-medium text-gray-700 mb-2">
                                     LLM 站点（可多选）
                                 </label>
-                                <div class="grid grid-cols-2 gap-2 p-3 border border-gray-300 rounded-md bg-gray-50">
+                                <div class="space-y-2 p-3 border border-gray-300 rounded-md bg-gray-50">
                                     <label class="flex items-center cursor-pointer hover:bg-gray-100 p-1 rounded">
                                         <input type="checkbox" id="llm-chatgpt" value="chatgpt" class="mr-2" checked>
-                                        <span class="text-sm">ChatGPT ⚡</span>
+                                        <span class="text-sm">ChatGPT ⚡ 推荐</span>
                                     </label>
                                     <label class="flex items-center cursor-pointer hover:bg-gray-100 p-1 rounded">
                                         <input type="checkbox" id="llm-gemini" value="gemini" class="mr-2">
                                         <span class="text-sm">Gemini</span>
-                                    </label>
-                                    <label class="flex items-center cursor-pointer hover:bg-gray-100 p-1 rounded">
-                                        <input type="checkbox" id="llm-grok" value="grok" class="mr-2">
-                                        <span class="text-sm">Grok</span>
-                                    </label>
-                                    <label class="flex items-center cursor-pointer hover:bg-gray-100 p-1 rounded">
-                                        <input type="checkbox" id="llm-perplexity" value="perplexity" class="mr-2">
-                                        <span class="text-sm">Perplexity</span>
-                                    </label>
-                                    <label class="flex items-center cursor-pointer hover:bg-gray-100 p-1 rounded">
-                                        <input type="checkbox" id="llm-qianwen" value="qianwen" class="mr-2">
-                                        <span class="text-sm">通义千问</span>
                                     </label>
                                 </div>
                                 <p class="text-xs text-gray-500 mt-1">💡 选择多个 LLM 可以对比分析结果</p>
@@ -374,22 +373,11 @@
                                 <label class="block text-sm font-medium text-gray-700 mb-2">
                                     模型版本
                                 </label>
-                                <select id="recap-model" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
+                                <select id="recap-model" class="w-full px-3 py-2 border border-gray-300 rounded-md">
                                     <option value="5.2instant">ChatGPT 5.2 Instant (快速)</option>
                                     <option value="5.2thinking">ChatGPT 5.2 Thinking (深度思考)</option>
                                     <option value="5.2pro">ChatGPT 5.2 Pro (最佳质量)</option>
                                 </select>
-                            </div>
-                            
-                            <div class="mb-4">
-                                <label class="block text-sm font-medium text-gray-700 mb-2">
-                                    Prompt 模板
-                                </label>
-                                <select id="recap-template" class="w-full px-3 py-2 border border-gray-300 rounded-md text-base">
-                                    <option value="">-- 使用默认模板 --</option>
-                                    <!-- 动态加载模板列表 -->
-                                </select>
-                                <p class="text-xs text-gray-500 mt-1">💡 可在"模板管理"中创建自定义模板</p>
                             </div>
                             
                             <div class="mb-4">
@@ -401,6 +389,11 @@
                             
                             <button onclick="loadTalkers()" class="btn btn-primary w-full mb-4">
                                 加载群聊列表
+                            </button>
+                            
+                            <!-- 测试按钮 -->
+                            <button onclick="showProgressMonitor('test-123'); updateProgressDisplay('test-123', {status: 'pending', message: '🧪 测试进度监控功能...'});" class="btn w-full mb-4 bg-purple-500 hover:bg-purple-600 text-white" style="background-color: #9333ea;">
+                                🧪 测试进度显示
                             </button>
                             
                             <div id="talkers-container" class="hidden">
@@ -432,21 +425,14 @@
                             </div>
                         </div>
                         
+                        <div>
+                        
                         <!-- 右侧：批次历史 -->
                         <div class="card">
-                            <div class="flex items-center justify-between mb-4">
-                                <h4 class="text-md font-semibold">复盘历史</h4>
-                                <div class="flex items-center gap-2">
-                                    <label class="flex items-center text-xs text-gray-600 cursor-pointer">
-                                        <input type="checkbox" id="auto-refresh-batches" class="mr-1" onchange="toggleAutoRefreshBatches()">
-                                        <span>自动刷新</span>
-                                    </label>
-                                    <span id="refresh-countdown" class="text-xs text-gray-400 hidden">(5s)</span>
-                                </div>
-                            </div>
+                            <h4 class="text-md font-semibold mb-4">复盘历史</h4>
                             
                             <button onclick="loadRecapBatches()" class="btn btn-primary w-full mb-4">
-                                🔄 刷新列表
+                                刷新列表
                             </button>
                             
                             <div id="recap-batches-list" class="max-h-96 overflow-y-auto">
@@ -467,16 +453,6 @@
                             <div id="batch-detail-content">
                                 <!-- 动态生成 -->
                             </div>
-                        </div>
-                    </div>
-                    
-                    <!-- 开发调试工具 -->
-                    <div class="mt-6 p-3 bg-gray-100 rounded-lg border border-gray-200">
-                        <div class="flex items-center justify-between">
-                            <span class="text-xs text-gray-500">🔧 开发调试</span>
-                            <button onclick="showProgressMonitor('test-123'); updateProgressDisplay('test-123', {status: 'pending', message: '🧪 测试进度监控功能...'});" class="text-xs px-3 py-1 bg-purple-100 text-purple-700 rounded hover:bg-purple-200">
-                                🧪 测试进度显示
-                            </button>
                         </div>
                     </div>
                 </div>
@@ -560,38 +536,17 @@
                             </div>
                         </div>
                         
-                        <!-- 右侧：模板预览和群聊映射 -->
+                        <!-- 右侧：群聊映射 -->
                         <div style="min-height: 400px;">
-                            <!-- 模板内容预览 -->
-                            <div id="template-preview" class="mb-6">
-                                <div class="flex items-center justify-between mb-4">
-                                    <h4 class="font-medium">📄 模板内容预览</h4>
-                                    <div class="flex items-center gap-2">
-                                        <button id="copy-template-btn" onclick="copyTemplateContent()" class="text-blue-600 hover:text-blue-800 text-sm hidden" title="复制模板内容">
-                                            📋 复制
-                                        </button>
-                                        <button id="close-preview-btn" onclick="closeTemplatePreview()" class="text-gray-500 hover:text-gray-700 hidden">
-                                            ✕ 关闭
-                                        </button>
-                                    </div>
-                                </div>
-                                <div id="template-preview-content" class="p-4 bg-gray-50 rounded-lg border border-gray-200 text-sm" style="max-height: 300px; overflow-y: auto;">
-                                    <p class="text-gray-500 italic">点击左侧模板查看内容</p>
-                                </div>
+                            <div class="flex items-center justify-between mb-4">
+                                <h4 class="font-medium">群聊-模板映射</h4>
+                                <button onclick="showCreateMappingModal()" class="btn btn-primary text-sm">
+                                    ➕ 新建映射
+                                </button>
                             </div>
                             
-                            <!-- 群聊-模板映射 -->
-                            <div>
-                                <div class="flex items-center justify-between mb-4">
-                                    <h4 class="font-medium">群聊-模板映射</h4>
-                                    <button onclick="showCreateMappingModal()" class="btn btn-primary text-sm">
-                                        ➕ 新建映射
-                                    </button>
-                                </div>
-                                
-                                <div id="mappings-list" class="space-y-2 max-h-48 overflow-y-auto">
-                                    <!-- 映射列表将通过 JS 动态加载 -->
-                                </div>
+                            <div id="mappings-list" class="space-y-2 max-h-96 overflow-y-auto">
+                                <!-- 映射列表将通过 JS 动态加载 -->
                             </div>
                         </div>
                     </div>
@@ -743,10 +698,6 @@
                     console.error('[初始化] 找不到日期输入元素');
                 }
                 
-                // 加载每日复盘模板列表
-                loadRecapTemplates();
-                console.log('[初始化] 模板列表已加载');
-                
                 // 自动刷新状态（每 5 秒）
                 statusRefreshInterval = setInterval(refreshStatus, 5000);
                 console.log('[初始化] 初始化完成');
@@ -764,8 +715,8 @@
                 el.classList.add('hidden');
             });
             
-            // 移除所有激活状态（左侧菜单）
-            document.querySelectorAll('.menu-item').forEach(el => {
+            // 移除所有激活状态
+            document.querySelectorAll('.tab-button').forEach(el => {
                 el.classList.remove('active');
             });
             
@@ -775,8 +726,8 @@
                 tabElement.classList.remove('hidden');
             }
             
-            // 激活对应的菜单项
-            document.querySelectorAll('.menu-item').forEach(el => {
+            // 激活对应的按钮（通过 tabName 查找，而不是依赖 event）
+            document.querySelectorAll('.tab-button').forEach(el => {
                 const onclick = el.getAttribute('onclick');
                 if (onclick && onclick.includes(`'${tabName}'`)) {
                     el.classList.add('active');
@@ -799,29 +750,28 @@
                 // 更新 Driver Server 状态
                 const driver = data.driver;
                 const statusDot = document.getElementById('driver-status-dot');
-                const statusText = document.getElementById('driver-status-text');
-                const configSites = document.getElementById('driver-config-sites');
-                const startBtn = document.getElementById('start-driver-btn');
-                const stopBtn = document.getElementById('stop-driver-btn');
-                
-                // 获取站点列表（优先使用 driver.sites，如果为空则用 brief.sites）
-                const sitesList = (driver.sites && driver.sites.length > 0) 
-                    ? driver.sites.join(', ') 
-                    : (data.brief.sites ? data.brief.sites.join(', ') : '-');
+                const driverInfo = document.getElementById('driver-info');
                 
                 if (driver.running && driver.ok) {
-                    if (statusDot) statusDot.className = 'status-dot status-running';
-                    if (statusText) statusText.textContent = `运行中 ✅`;
-                    if (configSites) configSites.textContent = `站点: ${sitesList}`;
-                    if (startBtn) startBtn.disabled = true;
-                    if (stopBtn) stopBtn.disabled = false;
+                    statusDot.className = 'status-dot status-running';
+                    driverInfo.innerHTML = `
+                        运行中 ✅<br>
+                        <span class="text-xs">站点: ${driver.sites.join(', ')}</span><br>
+                        <span class="text-xs">URL: ${driver.url}</span>
+                    `;
+                    document.getElementById('btn-start-driver').disabled = true;
+                    document.getElementById('btn-stop-driver').disabled = false;
                 } else {
-                    if (statusDot) statusDot.className = 'status-dot status-stopped';
-                    if (statusText) statusText.textContent = driver.error || '已停止';
-                    if (configSites) configSites.textContent = `站点: ${sitesList}`;
-                    if (startBtn) startBtn.disabled = false;
-                    if (stopBtn) stopBtn.disabled = true;
+                    statusDot.className = 'status-dot status-stopped';
+                    driverInfo.innerHTML = `未运行 ❌<br><span class="text-xs">${driver.error || '未启动'}</span>`;
+                    document.getElementById('btn-start-driver').disabled = false;
+                    document.getElementById('btn-stop-driver').disabled = true;
                 }
+                
+                // 更新配置信息
+                document.getElementById('config-sites').textContent = data.brief.sites.join(', ') || '-';
+                document.getElementById('config-output').textContent = data.brief.output_dir || '-';
+                document.getElementById('status-timestamp').textContent = new Date(data.timestamp).toLocaleString('zh-CN');
                 
             } catch (error) {
                 console.error('刷新状态失败:', error);
@@ -831,8 +781,8 @@
         // 启动 Driver Server
         async function startDriver() {
             try {
-                document.getElementById('start-driver-btn').disabled = true;
-                document.getElementById('start-driver-btn').textContent = '⏳ 启动中...';
+                document.getElementById('btn-start-driver').disabled = true;
+                document.getElementById('btn-start-driver').textContent = '⏳ 启动中...';
                 
                 const response = await axios.post('/api/driver/start');
                 
@@ -845,14 +795,14 @@
             } catch (error) {
                 alert('❌ 启动失败: ' + (error.response?.data?.error || error.message));
             } finally {
-                document.getElementById('start-driver-btn').textContent = '▶️ 启动';
+                document.getElementById('btn-start-driver').textContent = '▶️ 启动';
                 await refreshStatus();
             }
         }
 
         // 停止 Driver Server
         async function stopDriver() {
-            const button = document.getElementById('stop-driver-btn');
+            const button = document.getElementById('btn-stop-driver');
             if (!button) return;
             
             // 禁用按钮并显示进度
@@ -1081,85 +1031,6 @@
         // ========== 每日复盘相关函数 ==========
         
         let selectedTalkers = [];
-        let autoRefreshBatchesInterval = null;
-        let autoRefreshCountdown = 5;
-        let countdownInterval = null;
-        let progressStartTime = null;  // 记录处理开始时间
-        let taskStartTimes = {};       // 记录每个任务的开始时间
-        
-        // 自动刷新批次列表
-        function toggleAutoRefreshBatches() {
-            const checkbox = document.getElementById('auto-refresh-batches');
-            const countdownEl = document.getElementById('refresh-countdown');
-            
-            if (checkbox && checkbox.checked) {
-                // 启用自动刷新
-                loadRecapBatches(); // 立即刷新一次
-                
-                autoRefreshCountdown = 5;
-                countdownEl.classList.remove('hidden');
-                updateRefreshCountdown();
-                
-                // 倒计时更新
-                countdownInterval = setInterval(() => {
-                    autoRefreshCountdown--;
-                    updateRefreshCountdown();
-                    
-                    if (autoRefreshCountdown <= 0) {
-                        autoRefreshCountdown = 5;
-                        loadRecapBatches();
-                    }
-                }, 1000);
-                
-                console.log('[自动刷新] 已启用批次列表自动刷新');
-            } else {
-                // 禁用自动刷新
-                if (countdownInterval) {
-                    clearInterval(countdownInterval);
-                    countdownInterval = null;
-                }
-                countdownEl.classList.add('hidden');
-                console.log('[自动刷新] 已禁用批次列表自动刷新');
-            }
-        }
-        
-        function updateRefreshCountdown() {
-            const countdownEl = document.getElementById('refresh-countdown');
-            if (countdownEl) {
-                countdownEl.textContent = `(${autoRefreshCountdown}s)`;
-            }
-        }
-        
-        // 加载模板列表到每日复盘页面
-        async function loadRecapTemplates() {
-            const templateSelect = document.getElementById('recap-template');
-            if (!templateSelect) return;
-            
-            try {
-                const response = await axios.get('/api/templates');
-                if (response.data.ok) {
-                    const templates = response.data.templates || [];
-                    
-                    // 保留默认选项
-                    templateSelect.innerHTML = '<option value="">-- 使用默认模板 --</option>';
-                    
-                    // 添加模板选项
-                    templates.forEach(t => {
-                        const option = document.createElement('option');
-                        option.value = t.id;
-                        option.textContent = `${t.name} (${t.llm_type === 'all' ? '通用' : t.llm_type.toUpperCase()})`;
-                        if (t.is_system) {
-                            option.textContent += ' 📋';
-                        }
-                        templateSelect.appendChild(option);
-                    });
-                    
-                    console.log('[loadRecapTemplates] 加载了', templates.length, '个模板');
-                }
-            } catch (error) {
-                console.error('[loadRecapTemplates] 加载模板失败:', error);
-            }
-        }
         
         async function loadTalkers() {
             const button = event.target;
@@ -1279,13 +1150,12 @@
                 
                 // 获取选中的 LLM
                 const selectedLLMs = [];
-                const llmCheckboxes = ['chatgpt', 'gemini', 'grok', 'perplexity', 'qianwen'];
-                llmCheckboxes.forEach(llm => {
-                    const checkbox = document.getElementById(`llm-${llm}`);
-                    if (checkbox && checkbox.checked) {
-                        selectedLLMs.push(llm);
-                    }
-                });
+                if (document.getElementById('llm-chatgpt').checked) {
+                    selectedLLMs.push('chatgpt');
+                }
+                if (document.getElementById('llm-gemini').checked) {
+                    selectedLLMs.push('gemini');
+                }
                 
                 if (selectedLLMs.length === 0) {
                     alert('⚠️ 请至少选择一个 LLM');
@@ -1293,7 +1163,6 @@
                 }
                 
                 const model = document.getElementById('recap-model').value;
-                const templateId = document.getElementById('recap-template').value;
                 const isPublic = document.getElementById('recap-public').checked;
                 
                 console.log('🔍 [DEBUG] 表单数据:');
@@ -1301,7 +1170,6 @@
                 console.log('  - dateEnd:', dateEnd);
                 console.log('  - selectedLLMs:', selectedLLMs);
                 console.log('  - model:', model);
-                console.log('  - templateId:', templateId || '(默认)');
                 console.log('  - isPublic:', isPublic);
                 console.log('  - talkers:', selectedTalkers);
                 
@@ -1317,7 +1185,6 @@
                         date_end: dateEnd,
                         llm_site: llm,
                         model_version: model,
-                        template_id: templateId || null,
                         public: isPublic
                     });
                     
@@ -1474,29 +1341,6 @@
             }
         }
         
-        // 生成 Obsidian URI 链接
-        function generateObsidianUri(filePath) {
-            if (!filePath) return null;
-            
-            // Obsidian vault 名称（从路径中提取）
-            // 假设路径格式：/Users/xxx/work/personal/obsidian/personal/10_Sources/...
-            // vault 名称是 "personal"
-            const vaultMatch = filePath.match(/obsidian\/([^\/]+)\//);
-            if (!vaultMatch) return null;
-            
-            const vaultName = vaultMatch[1];
-            
-            // 提取相对于 vault 的文件路径
-            const vaultPath = filePath.substring(filePath.indexOf(`obsidian/${vaultName}/`) + `obsidian/${vaultName}/`.length);
-            
-            // 构建 Obsidian URI
-            // obsidian://open?vault=VAULT_NAME&file=FILE_PATH
-            const encodedVault = encodeURIComponent(vaultName);
-            const encodedFile = encodeURIComponent(vaultPath.replace(/\.md$/, '')); // Obsidian 不需要 .md 后缀
-            
-            return `obsidian://open?vault=${encodedVault}&file=${encodedFile}`;
-        }
-        
         async function showBatchDetail(batchId) {
             try {
                 const response = await axios.get(`/api/recap/batch/${batchId}`);
@@ -1518,31 +1362,6 @@
                             statusIcon = '⏸';
                         }
                         
-                        // 生成 Obsidian 链接
-                        let resultPathHtml = '';
-                        if (task.result_path) {
-                            const obsidianUri = generateObsidianUri(task.result_path);
-                            // 获取文件名用于显示
-                            const fileName = task.result_path.split('/').pop();
-                            
-                            if (obsidianUri) {
-                                resultPathHtml = `
-                                    <div class="mt-2 p-2 bg-purple-50 border border-purple-200 rounded">
-                                        <a href="${obsidianUri}" class="flex items-center gap-2 text-purple-700 hover:text-purple-900" title="点击在 Obsidian 中打开">
-                                            <span class="text-lg">🔮</span>
-                                            <div class="flex-1 min-w-0">
-                                                <div class="text-sm font-medium truncate">在 Obsidian 中打开</div>
-                                                <div class="text-xs text-purple-500 truncate">${fileName}</div>
-                                            </div>
-                                            <span class="text-purple-400">→</span>
-                                        </a>
-                                    </div>
-                                `;
-                            } else {
-                                resultPathHtml = `<div class="text-xs text-blue-600 mt-1">📄 ${task.result_path}</div>`;
-                            }
-                        }
-                        
                         tasksHtml += `
                             <div class="border-b border-gray-200 py-3">
                                 <div class="flex justify-between items-center">
@@ -1550,7 +1369,7 @@
                                     <span class="text-xs text-gray-500">${task.message_count || 0} 条消息</span>
                                 </div>
                                 ${task.error_message ? `<div class="text-xs text-red-600 mt-1">错误: ${task.error_message}</div>` : ''}
-                                ${resultPathHtml}
+                                ${task.result_path ? `<div class="text-xs text-blue-600 mt-1">📄 ${task.result_path}</div>` : ''}
                             </div>
                         `;
                     });
@@ -1594,19 +1413,11 @@
             const monitor = document.getElementById('progress-monitor');
             if (monitor) {
                 monitor.classList.remove('hidden');
-                
-                // 初始化计时器
-                progressStartTime = new Date();
-                taskStartTimes = {};
-                
                 updateProgressDisplay(batchId, {
                     status: 'pending',
                     message: '🚀 批次已创建，正在启动处理...',
                     batch_id: batchId
                 });
-                
-                // 启动 5 秒自动刷新进度
-                startProgressPolling(batchId);
             }
         }
         
@@ -1619,10 +1430,6 @@
                 clearInterval(progressPollingInterval);
                 progressPollingInterval = null;
             }
-            
-            // 重置计时器
-            progressStartTime = null;
-            taskStartTimes = {};
             
             // 清空选择并刷新列表
             selectedTalkers = [];
@@ -1637,40 +1444,21 @@
             const content = document.getElementById('progress-content');
             if (!content) return;
             
-            const now = new Date();
-            const nowStr = now.toLocaleTimeString('zh-CN', { hour12: false });
-            
-            // 计算总耗时
-            let totalElapsed = '';
-            if (progressStartTime) {
-                const elapsed = Math.floor((now - progressStartTime) / 1000);
-                const mins = Math.floor(elapsed / 60);
-                const secs = elapsed % 60;
-                totalElapsed = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
-            }
+            const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
             
             let html = `
                 <div class="font-mono text-xs">
-                    <div class="flex justify-between mb-2">
-                        <div>
-                            <span class="text-gray-600">批次ID:</span> 
-                            <span class="font-semibold">${batchId}</span>
-                        </div>
-                        <div class="text-right">
-                            <span class="text-gray-600">⏱️ 总耗时:</span> 
-                            <span class="font-semibold text-orange-600">${totalElapsed || '计时中...'}</span>
-                        </div>
+                    <div class="mb-2">
+                        <span class="text-gray-600">批次ID:</span> 
+                        <span class="font-semibold">${batchId}</span>
                     </div>
-                    <div class="mb-2 text-gray-500">
-                        更新于: ${nowStr} (每5秒自动刷新)
+                    <div class="mb-2">
+                        <span class="text-gray-600">更新时间:</span> 
+                        <span>${now}</span>
                     </div>
             `;
             
             if (data.status === 'pending') {
-                // 记录开始时间
-                if (!progressStartTime) {
-                    progressStartTime = new Date();
-                }
                 html += `
                     <div class="flex items-center space-x-2 text-blue-700">
                         <span class="animate-pulse">⏳</span>
@@ -1697,37 +1485,19 @@
                     </div>
                     
                     <div class="space-y-2">
-                        ${tasks.map((task, index) => {
+                        ${tasks.map(task => {
                             let icon = '⏸️';
                             let statusText = '待处理';
                             let colorClass = 'text-gray-600';
-                            let durationText = '';
-                            
-                            // 跟踪任务时间
-                            const taskKey = `${batchId}_${index}`;
                             
                             if (task.status === 'completed') {
                                 icon = '✅';
+                                statusText = '已完成';
                                 colorClass = 'text-green-600';
-                                // 计算任务耗时
-                                if (task.created_at && task.completed_at) {
-                                    const taskDuration = Math.floor((new Date(task.completed_at) - new Date(task.created_at)) / 1000);
-                                    const taskMins = Math.floor(taskDuration / 60);
-                                    const taskSecs = taskDuration % 60;
-                                    durationText = taskMins > 0 ? `⏱️ ${taskMins}分${taskSecs}秒` : `⏱️ ${taskSecs}秒`;
-                                }
-                                statusText = '已完成 ' + durationText;
                             } else if (task.status === 'processing') {
                                 icon = '⏳';
+                                statusText = '处理中...';
                                 colorClass = 'text-blue-600 animate-pulse';
-                                // 记录处理中任务的开始时间
-                                if (!taskStartTimes[taskKey]) {
-                                    taskStartTimes[taskKey] = new Date();
-                                }
-                                const processingTime = Math.floor((now - taskStartTimes[taskKey]) / 1000);
-                                const pMins = Math.floor(processingTime / 60);
-                                const pSecs = processingTime % 60;
-                                statusText = `处理中... ${pMins > 0 ? pMins + '分' : ''}${pSecs}秒`;
                             } else if (task.status === 'failed') {
                                 icon = '❌';
                                 statusText = '失败';
@@ -1738,13 +1508,10 @@
                                 <div class="flex items-start space-x-2 p-2 bg-white rounded border border-gray-200">
                                     <span class="${colorClass}">${icon}</span>
                                     <div class="flex-1 min-w-0">
-                                        <div class="flex justify-between items-center">
-                                            <span class="font-medium text-sm truncate">${task.display_name || task.talker}</span>
-                                            <span class="text-xs text-gray-400">#${index + 1}</span>
-                                        </div>
+                                        <div class="font-medium text-sm truncate">${task.display_name || task.talker}</div>
                                         <div class="text-xs ${colorClass}">${statusText}</div>
-                                        ${task.message_count ? `<div class="text-xs text-gray-500">📝 ${task.message_count} 条消息</div>` : ''}
-                                        ${task.error_message ? `<div class="text-xs text-red-600 mt-1">❗ ${task.error_message.substring(0, 50)}...</div>` : ''}
+                                        ${task.message_count ? `<div class="text-xs text-gray-500">${task.message_count} 条消息</div>` : ''}
+                                        ${task.error_message ? `<div class="text-xs text-red-600 mt-1">错误: ${task.error_message.substring(0, 50)}...</div>` : ''}
                                     </div>
                                 </div>
                             `;
@@ -2019,111 +1786,18 @@
             }
         }
         
-        // 存储当前查看的模板内容（用于复制）
-        let currentTemplateContent = '';
-        
         async function viewTemplate(templateId) {
-            const previewContent = document.getElementById('template-preview-content');
-            const closeBtn = document.getElementById('close-preview-btn');
-            const copyBtn = document.getElementById('copy-template-btn');
-            
-            if (!previewContent) {
-                console.error('找不到预览区域');
-                return;
-            }
-            
-            // 显示加载状态
-            previewContent.innerHTML = '<p class="text-gray-500">⏳ 加载中...</p>';
-            currentTemplateContent = '';
-            
             try {
-                // 获取模板详情和内容
-                const [detailRes, contentRes] = await Promise.all([
-                    axios.get(`/api/templates/${templateId}`),
-                    axios.get(`/api/templates/${templateId}/content`)
-                ]);
-                
-                if (contentRes.data.ok) {
-                    const template = detailRes.data.template || {};
-                    const content = contentRes.data.content || '(无内容)';
-                    
-                    // 保存原始内容用于复制
-                    currentTemplateContent = content;
-                    
-                    // 格式化显示（保持原始 Markdown 格式）
-                    previewContent.innerHTML = `
-                        <div class="mb-3 pb-3 border-b border-gray-200">
-                            <div class="font-semibold text-gray-800">${escapeHtml(template.name || templateId)}</div>
-                            <div class="text-xs text-gray-500 mt-1">
-                                ID: ${templateId} | 
-                                LLM: ${template.llm_type || 'all'} | 
-                                ${template.is_system ? '系统模板' : '自定义模板'}
-                                ${template.base_template_id ? ' | 继承自: ' + template.base_template_id : ''}
-                            </div>
-                            ${template.description ? '<div class="text-sm text-gray-600 mt-2">' + escapeHtml(template.description) + '</div>' : ''}
-                        </div>
-                        <pre class="whitespace-pre-wrap text-xs font-mono text-gray-700 leading-relaxed bg-white p-3 rounded border border-gray-100">${escapeHtml(content)}</pre>
-                    `;
-                    
-                    // 显示按钮
-                    if (closeBtn) closeBtn.classList.remove('hidden');
-                    if (copyBtn) copyBtn.classList.remove('hidden');
+                const response = await axios.get(`/api/templates/${templateId}/content`);
+                if (response.data.ok) {
+                    alert(`模板内容:\n\n${response.data.content}`);
                 } else {
-                    previewContent.innerHTML = `<p class="text-red-500">❌ 获取模板内容失败: ${contentRes.data.error}</p>`;
+                    alert('❌ 获取模板内容失败: ' + response.data.error);
                 }
             } catch (error) {
                 console.error('查看模板失败:', error);
-                previewContent.innerHTML = `<p class="text-red-500">❌ 请求失败: ${error.message}</p>`;
+                alert('❌ 请求失败: ' + error.message);
             }
-        }
-        
-        function closeTemplatePreview() {
-            const previewContent = document.getElementById('template-preview-content');
-            const closeBtn = document.getElementById('close-preview-btn');
-            const copyBtn = document.getElementById('copy-template-btn');
-            
-            if (previewContent) {
-                previewContent.innerHTML = '<p class="text-gray-500 italic">点击左侧模板查看内容</p>';
-            }
-            if (closeBtn) closeBtn.classList.add('hidden');
-            if (copyBtn) copyBtn.classList.add('hidden');
-            currentTemplateContent = '';
-        }
-        
-        async function copyTemplateContent() {
-            const copyBtn = document.getElementById('copy-template-btn');
-            
-            if (!currentTemplateContent) {
-                alert('❌ 没有可复制的内容');
-                return;
-            }
-            
-            try {
-                await navigator.clipboard.writeText(currentTemplateContent);
-                
-                // 显示复制成功反馈
-                if (copyBtn) {
-                    const originalText = copyBtn.textContent;
-                    copyBtn.textContent = '✅ 已复制';
-                    copyBtn.classList.remove('text-blue-600', 'hover:text-blue-800');
-                    copyBtn.classList.add('text-green-600');
-                    
-                    setTimeout(() => {
-                        copyBtn.textContent = originalText;
-                        copyBtn.classList.remove('text-green-600');
-                        copyBtn.classList.add('text-blue-600', 'hover:text-blue-800');
-                    }, 2000);
-                }
-            } catch (error) {
-                console.error('复制失败:', error);
-                alert('❌ 复制失败: ' + error.message);
-            }
-        }
-        
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
         }
         
         async function editTemplate(templateId) {
